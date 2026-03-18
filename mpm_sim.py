@@ -41,6 +41,9 @@ water_lambda = 3000.0
 water_mu = 50.0   # Water bulk stiffness (not viscosity). Provides pressure-based drag via elastic stiffness.
                   # Higher values slow particle displacement; ≥150 makes water gel-like and unphysical.
 grid_drag = 0.0   # Brinkman drag per grid node per step (0 = disabled). Overshoots easily; use water_mu instead.
+water_visc = 0.0  # Kinematic viscosity for Laplacian grid diffusion (m²/s in sim units).
+                  # CFL limit: water_visc ≤ dx²/(4·dt) = (1/128)²/(4×5e-5) ≈ 0.305.
+                  # 0.0 = disabled (no extra kernel launch). Tune after calibrating water_mu.
 payload_gravity_factor = 0.80  # Gravity scaling for payload. Net downward = 2.5×0.80 - 1.0 = 1.0× (slight neg. buoyancy).
                                 # Physical basis: AUV neutrally buoyant by design; 2.5× inertial mass drives selection.
 gravity = 10.0
@@ -53,7 +56,6 @@ actuation_strength = 10000.0
 video_res = 1024
 grid_side = int(math.ceil(math.sqrt(n_instances)))
 res_sub = video_res // grid_side
-visual_glow = ti.field(dtype=float, shape=(n_instances, n_particles))
 
 # --- GPU MEMORY ALLOCATION ---
 print(f"Allocating {n_instances} instances with {n_particles} particles each...")
@@ -65,6 +67,7 @@ material = ti.field(dtype=int, shape=(n_instances, n_particles))
 Jp = ti.field(dtype=float, shape=(n_instances, n_particles))
 grid_v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid))
 grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid))
+grid_v_lap = ti.Vector.field(2, dtype=float, shape=(n_instances, n_grid, n_grid))  # Laplacian diffusion double-buffer
 
 sim_time = ti.field(dtype=float, shape=())
 frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
@@ -84,13 +87,13 @@ for _i in range(n_instances):
 # --- PHYSICS KERNELS ---
 
 @ti.kernel
-def substep():
-    """Main Physics Step (P2G -> Grid -> G2P)."""
-    # 0. Update Time & Pulse
+def _substep_p2g():
+    """Grid reset + Particle-to-Grid scatter."""
+    # Compute activation waveform from current sim time
     current_time = sim_time[None]
     period = 1.0 / actuation_freq
     phase = (current_time % period) / period
-    
+
     # Raised cosine waveform: 20% contraction, 80% relaxation (bio-inspired asymmetry)
     activation = 0.0
     if phase < 0.2:
@@ -98,8 +101,7 @@ def substep():
     elif phase < 1.0:
         activation = 0.5 * (1.0 + ti.cos((phase - 0.2) / 0.8 * 3.14159265))
 
-
-    # 1. Reset Grid
+    # 1. Reset Grid (sequential before P2G within this kernel)
     for m, i, j in grid_m:
         grid_v[m, i, j] = [0, 0]
         grid_m[m, i, j] = 0
@@ -110,68 +112,72 @@ def substep():
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
         if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2: continue
-        
+
         fx = x[m, p] * inv_dx - base.cast(float)
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
-        
+
         F[m, p] = (ti.Matrix.identity(float, 2) + dt * C[m, p]) @ F[m, p]
 
-        # Material Logic
-        mu, la = mu_0_base, lambda_0_base
-        current_mass = p_mass  # Base mass
-
-        if material[m, p] == 1 or material[m, p] == 3:  # Jelly or Muscle
-            mu, la = mu_jelly, lambda_jelly
-        
-        elif material[m, p] == 2:  # Payload (Heavy Rigid Body)
-            mu, la = mu_payload, lambda_payload
-            # CRITICAL FIX: Increase density 4x. 
-            # This lowers sound speed c = sqrt(E/rho) to prevent CFL explosion
-            # while keeping the payload heavy (inertial resistance).
+        # Material properties
+        current_mass = p_mass
+        if material[m, p] == 2:
             current_mass *= 2.5
-            
-        elif material[m, p] == 0:  # Water
-            mu, la = water_mu, water_lambda  # mu=0: no elastic shear; la sets pressure-volume law
 
-        # SVD & Plasticity
-        U, sig, V = ti.svd(F[m, p])
-        for d in ti.static(range(2)):
-            sig[d, d] = ti.max(sig[d, d], 1e-6)
-
-        J = 1.0
-        for d in ti.static(range(2)):
-            new_sig = sig[d, d]
-            if material[m, p] == 2:  # Payload Plasticity
-                # Strict clamping prevents "spring winding" explosion
-                new_sig = ti.min(ti.max(sig[d, d], 1 - 5e-3), 1 + 5e-3)
-            Jp[m, p] *= sig[d, d] / new_sig
-            sig[d, d] = new_sig
-            J *= new_sig
+        stress = ti.Matrix.zero(float, 2, 2)
 
         if material[m, p] == 0:
-            F[m, p] = ti.Matrix.identity(float, 2) * ti.sqrt(J)
-        elif material[m, p] == 2:
-            F[m, p] = U @ sig @ V.transpose()
-            
-        # Stress Calculation
-        stress = 2 * mu * (F[m, p] - U @ V.transpose()) @ F[m, p].transpose() + \
-                 ti.Matrix.identity(float, 2) * la * J * (J - 1)
+            # --- Water fast path: skip SVD ---
+            # F starts as scalar*I each step (reset below), so U@V^T ≈ I (error O(dt·C) ≈ 5e-3).
+            # Stress is isotropic: purely volumetric (water_lambda) + isotropic shear (water_mu).
+            J = F[m, p].determinant()
+            J = ti.max(J, 1e-6)
+            s = ti.sqrt(J)
+            stress = ((2.0 * water_mu * (s - 1.0) * s) + (water_lambda * J * (J - 1.0))) * \
+                     ti.Matrix.identity(float, 2)
+            F[m, p] = ti.Matrix.identity(float, 2) * s   # reset to scalar matrix
 
-        # Active Muscle Stress
-        if material[m, p] == 3:
-            contractile_pressure = actuation_strength * activation
-            if ti.static(use_anisotropic_actuation):
-                fd = fiber_dir[m, p].normalized()
-                stress += fd.outer_product(fd) * contractile_pressure * J
-            else:
-                stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
+        else:
+            # --- SVD path: jelly (1), payload (2), muscle (3) ---
+            mu = mu_0_base
+            la = lambda_0_base
+            if material[m, p] == 1 or material[m, p] == 3:
+                mu, la = mu_jelly, lambda_jelly
+            elif material[m, p] == 2:
+                mu, la = mu_payload, lambda_payload
+
+            U, sig, V = ti.svd(F[m, p])
+            for d in ti.static(range(2)):
+                sig[d, d] = ti.max(sig[d, d], 1e-6)
+
+            J = 1.0
+            for d in ti.static(range(2)):
+                new_sig = sig[d, d]
+                if material[m, p] == 2:  # Payload plasticity: strict clamping prevents spring-winding
+                    new_sig = ti.min(ti.max(sig[d, d], 1 - 5e-3), 1 + 5e-3)
+                Jp[m, p] *= sig[d, d] / new_sig
+                sig[d, d] = new_sig
+                J *= new_sig
+
+            if material[m, p] == 2:
+                F[m, p] = U @ sig @ V.transpose()
+
+            stress = 2 * mu * (F[m, p] - U @ V.transpose()) @ F[m, p].transpose() + \
+                     ti.Matrix.identity(float, 2) * la * J * (J - 1)
+
+            # Active Muscle Stress
+            if material[m, p] == 3:
+                contractile_pressure = actuation_strength * activation
+                if ti.static(use_anisotropic_actuation):
+                    fd = fiber_dir[m, p].normalized()
+                    stress += fd.outer_product(fd) * contractile_pressure * J
+                else:
+                    stress += ti.Matrix.identity(float, 2) * contractile_pressure * J
 
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
-        
-        # Affine momentum transfer (APIC)
-        # Uses current_mass to properly weight the heavy payload
+
+        # APIC affine momentum transfer
         affine = stress + current_mass * C[m, p]
-        
+
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
             dpos = (offset.cast(float) - fx) * dx
@@ -179,29 +185,35 @@ def substep():
             grid_v[m, base + offset] += weight * (current_mass * v[m, p] + affine @ dpos)
             grid_m[m, base + offset] += weight * current_mass
 
-    # 3. Grid Operations
+
+@ti.kernel
+def _substep_grid_ops():
+    """Grid velocity normalization, damping, and boundary conditions."""
     for m, i, j in grid_m:
         if grid_m[m, i, j] > 0:
             grid_v[m, i, j] /= grid_m[m, i, j]
-            
-            # Brinkman drag (disabled: grid_drag=0). Only active if grid_drag > 0.
+
+            # Brinkman drag (disabled: grid_drag=0). Tunable if needed.
             if ti.static(grid_drag > 0):
                 grid_v[m, i, j] *= (1.0 - grid_drag)
-            
-            # Boundary Damping
+
+            # Boundary damping layer
             damp_cells = n_grid // 20
             damp = 1.0
             if i < damp_cells: damp *= 0.95 + 0.05 * i / damp_cells
             if i > n_grid - damp_cells: damp *= 0.95 + 0.05 * (n_grid - i) / damp_cells
             grid_v[m, i, j] *= damp
 
-            # Wall Collisions
+            # Wall collisions
             if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
             if i > n_grid - 3 and grid_v[m, i, j][0] > 0: grid_v[m, i, j][0] = 0
             if j < 3 and grid_v[m, i, j][1] < 0: grid_v[m, i, j][1] = 0
             if j > n_grid - 3 and grid_v[m, i, j][1] > 0: grid_v[m, i, j][1] = 0
 
-    # 4. G2P
+
+@ti.kernel
+def _substep_g2p():
+    """Grid-to-Particle gather, gravity, position update, time advance."""
     for m, p in x:
         if material[m, p] < 0: continue
 
@@ -222,16 +234,48 @@ def substep():
         g_factor = payload_gravity_factor if material[m, p] == 2 else 1.0
         v[m, p][1] -= dt * gravity * g_factor
         x[m, p] += dt * v[m, p]
-        
+
         for d in ti.static(range(2)):
             x[m, p][d] = ti.max(ti.min(x[m, p][d], 0.999), 0.001)
-    
-    #5. Glowing Effect?
-    for m, p in x:
-        # Slow decay of the visual effect
-        visual_glow[m, p] = ti.max(visual_glow[m, p] * 0.9, ti.abs(1.0 - Jp[m, p]))
 
     sim_time[None] += dt
+
+
+@ti.kernel
+def _substep_viscosity(visc: float):
+    """Laplacian grid diffusion: reads grid_v, writes grid_v_lap.
+    5-point stencil: ν·dt·∇²v added to each cell. Boundary cells clamp to nearest valid neighbor.
+    visc is passed at call time so the validation script can sweep values without recompile.
+    CFL: visc ≤ dx²/(4·dt) ≈ 0.305."""
+    for m, i, j in grid_v:
+        if grid_m[m, i, j] <= 0.0:
+            grid_v_lap[m, i, j] = [0.0, 0.0]
+        else:
+            v_c  = grid_v[m, i,                          j                         ]
+            v_px = grid_v[m, ti.min(i + 1, n_grid - 1),  j                         ]
+            v_mx = grid_v[m, ti.max(i - 1, 0),           j                         ]
+            v_py = grid_v[m, i,                          ti.min(j + 1, n_grid - 1) ]
+            v_my = grid_v[m, i,                          ti.max(j - 1, 0)          ]
+            lap  = (v_px + v_mx + v_py + v_my - 4.0 * v_c) * inv_dx * inv_dx
+            grid_v_lap[m, i, j] = v_c + visc * dt * lap
+
+
+@ti.kernel
+def _substep_copy_lap():
+    """Copy Laplacian-diffused velocities back to grid_v for G2P to read."""
+    for m, i, j in grid_v:
+        grid_v[m, i, j] = grid_v_lap[m, i, j]
+
+
+def substep():
+    """Main physics step: P2G → grid ops → [viscosity] → G2P.
+    All kernels queued on CUDA stream; no CPU sync between them."""
+    _substep_p2g()
+    _substep_grid_ops()
+    if water_visc > 0.0:
+        _substep_viscosity(water_visc)
+        _substep_copy_lap()
+    _substep_g2p()
 
 
 ##Rendering Pipeline
