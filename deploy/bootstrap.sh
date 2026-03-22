@@ -38,18 +38,20 @@ echo "  OK"
 
 echo ""
 echo "=== [3/6] Cloning repo ==="
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
 if [ -d "$WORKDIR/.git" ]; then
     echo "  Repo already exists — pulling latest"
-    cd "$WORKDIR"
     git remote set-url origin "https://${GITHUB_TOKEN}@github.com/${REPO}.git"
     git fetch origin
     git checkout "$BRANCH"
     git pull origin "$BRANCH"
 else
-    git clone --branch "$BRANCH" \
-        "https://${GITHUB_TOKEN}@github.com/${REPO}.git" \
-        "$WORKDIR"
-    cd "$WORKDIR"
+    echo "  Initialising git in existing directory (preserving output/)"
+    git init
+    git remote add origin "https://${GITHUB_TOKEN}@github.com/${REPO}.git"
+    git fetch origin "$BRANCH"
+    git checkout -b "$BRANCH" --track "origin/$BRANCH"
 fi
 echo "  OK — $(git log --oneline -1)"
 
