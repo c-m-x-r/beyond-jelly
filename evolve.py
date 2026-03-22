@@ -23,6 +23,8 @@ import os
 import csv
 import json
 import pickle
+import subprocess
+import threading
 
 import taichi as ti
 import mpm_sim as sim
@@ -47,6 +49,117 @@ PENALTY_INVALID = 100.0
 VIEW_STEPS = 100000      # Sim steps for rendered view (matches eval duration)
 VIEW_RENDER_EVERY = 200  # Render a frame every N substeps
 VIEW_FPS = 30
+
+# --- THERMAL MANAGEMENT ---
+# Master switch — pass --no-thermal to disable entirely
+THERMAL_ENABLE = True
+THERMAL_PAUSE_TEMP    = 83    # °C: pause after a generation if GPU is above this
+THERMAL_RESUME_TEMP   = 72    # °C: resume once cooled to here (11° hysteresis)
+THERMAL_MIN_CLK_RATIO = 0.85  # also require clocks recovered to ≥85% of max
+THERMAL_POLL_INTERVAL = 5.0   # seconds between nvidia-smi polls while cooling
+# Thresholds can be overridden at runtime by editing output/thermal_config.json
+# without stopping the run.
+
+
+def nvidia_smi_query():
+    """Return (temp_c, clock_mhz, max_clock_mhz). Returns (0,1,1) on failure."""
+    try:
+        out = subprocess.check_output(
+            ['nvidia-smi',
+             '--query-gpu=temperature.gpu,clocks.current.graphics,clocks.max.graphics',
+             '--format=csv,noheader,nounits'],
+            stderr=subprocess.DEVNULL, timeout=5
+        ).decode().strip()
+        parts = [p.strip() for p in out.split(',')]
+        return int(parts[0]), int(parts[1]), int(parts[2])
+    except Exception:
+        return 0, 1, 1
+
+
+def _load_thermal_config():
+    """Read runtime-editable thresholds from output/thermal_config.json if present."""
+    cfg_path = os.path.join(OUTPUT_DIR, 'thermal_config.json')
+    defaults = {
+        'pause_temp': THERMAL_PAUSE_TEMP,
+        'resume_temp': THERMAL_RESUME_TEMP,
+        'min_clk_ratio': THERMAL_MIN_CLK_RATIO,
+    }
+    if not os.path.exists(cfg_path):
+        return defaults
+    try:
+        with open(cfg_path) as f:
+            return {**defaults, **json.load(f)}
+    except Exception:
+        return defaults
+
+
+class ThermalMonitor:
+    """Background thread that polls nvidia-smi every N seconds during a sim run."""
+    def __init__(self, poll_interval=2.0):
+        self.poll_interval = poll_interval
+        self.records = []   # list of (elapsed_s, temp_c, clock_mhz, max_clock_mhz)
+        self._stop = threading.Event()
+        self._thread = None
+        self._t0 = None
+
+    def start(self):
+        self.records = []
+        self._stop.clear()
+        self._t0 = time.time()
+        self._thread = threading.Thread(target=self._poll, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=8.0)
+        return self.records
+
+    def _poll(self):
+        while not self._stop.wait(self.poll_interval):
+            temp, clock, max_clock = nvidia_smi_query()
+            self.records.append((time.time() - self._t0, temp, clock, max_clock))
+
+    def summary(self):
+        if not self.records:
+            return {}
+        temps  = [r[1] for r in self.records]
+        ratios = [r[2] / r[3] if r[3] > 0 else 1.0 for r in self.records]
+        return {
+            'temp_min': min(temps), 'temp_max': max(temps),
+            'temp_mean': np.mean(temps),
+            'clk_ratio_min': min(ratios), 'clk_ratio_mean': np.mean(ratios),
+        }
+
+
+def thermal_gate(gen, thermal_writer, thermal_file):
+    """Pause after a generation if GPU is too hot. Writes cooling records to thermal CSV."""
+    if not THERMAL_ENABLE:
+        return
+    cfg = _load_thermal_config()
+    temp, clock, max_clock = nvidia_smi_query()
+    ratio = clock / max_clock if max_clock > 0 else 1.0
+
+    if temp < cfg['pause_temp'] and ratio >= cfg['min_clk_ratio']:
+        return
+
+    print(f"  [THERMAL] Gen {gen}: {temp}°C ({ratio:.0%} clocks) — cooling pause...",
+          flush=True)
+    cool_start = time.time()
+    while True:
+        time.sleep(THERMAL_POLL_INTERVAL)
+        cfg = _load_thermal_config()   # re-read so thresholds can be tuned live
+        temp, clock, max_clock = nvidia_smi_query()
+        ratio = clock / max_clock if max_clock > 0 else 1.0
+        elapsed = time.time() - cool_start
+        print(f"  [THERMAL] {elapsed:.0f}s cooling: {temp}°C  clocks {ratio:.0%}", flush=True)
+        thermal_writer.writerow(['cooling', gen, f'{elapsed:.1f}', temp, clock, max_clock,
+                                 f'{ratio:.3f}'])
+        thermal_file.flush()
+        if temp <= cfg['resume_temp'] and ratio >= cfg['min_clk_ratio']:
+            print(f"  [THERMAL] Resumed. ({temp}°C, {ratio:.0%})", flush=True)
+            break
+
 
 # Web palette: material colors matching the web frontend (#E8F4F8, #4ECDC4, #FF6B6B, #FFA500)
 # Rendered in layer order: water first (back), payload last (front)
@@ -102,14 +215,17 @@ def compute_fitness(sim_results, muscle_counts):
 def load_batch(genomes, spawn_jitter=0.0):
     """
     Generate phenotypes and load all instances to GPU.
-    Returns muscle_counts list and per-instance stats.
+    Returns (muscle_counts, instance_stats, jitter_offsets).
     spawn_jitter: uniform random offset (±) applied to spawn position for trial variance.
+    jitter_offsets: list of (dx, dy) arrays actually applied per instance.
     """
     muscle_counts = []
     instance_stats = []
+    jitter_offsets = []
 
     for i, genome in enumerate(genomes):
-        jitter = np.random.uniform(-spawn_jitter, spawn_jitter, 2) if spawn_jitter > 0 else 0
+        jitter = np.random.uniform(-spawn_jitter, spawn_jitter, 2) if spawn_jitter > 0 else np.zeros(2)
+        jitter_offsets.append(jitter)
         pos, mat, fiber_dirs, stats = fill_tank(
             genome, sim.n_particles, grid_res=int(sim.n_grid),
             spawn_offset=DEFAULT_SPAWN + jitter
@@ -122,7 +238,7 @@ def load_batch(genomes, spawn_jitter=0.0):
         instance_stats.append(stats)
 
     ti.sync()
-    return muscle_counts, instance_stats
+    return muscle_counts, instance_stats, jitter_offsets
 
 
 def average_batch_results(results_1, results_2):
@@ -145,7 +261,7 @@ def run_baseline():
 
     genome = GENOME_X0
     genomes = [genome] * POPSIZE
-    muscle_counts, _ = load_batch(genomes)
+    muscle_counts, _, _ = load_batch(genomes)
 
     # Run a shorter sim for baseline (1 cycle)
     results = sim.run_batch_headless(20000)
@@ -258,7 +374,7 @@ def view_best(gen_idx=None, web_palette=False):
 
     # Load genomes into GPU
     print("Loading phenotypes...", flush=True)
-    load_batch(genomes)
+    load_batch(genomes)  # jitter_offsets discarded in view mode
 
     # Run simulation with rendering
     palette_suffix = "_web" if web_palette else ""
@@ -325,19 +441,41 @@ def evolve(generations):
         start_gen = 0
         history = []
 
-    # Prepare CSV (append mode for resume)
+    # Prepare evolution CSV (append mode for resume)
     csv_exists = os.path.exists(csv_path) and start_gen > 0
     csv_file = open(csv_path, 'a', newline='')
     csv_writer = csv.writer(csv_file)
     if not csv_exists:
-        header = ['generation', 'individual'] + [f'gene_{i}' for i in range(9)] + \
-                 ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma', 'trial_variance']
+        header = (
+            ['generation', 'individual'] +
+            [f'gene_{i}' for i in range(9)] +
+            ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma',
+             'trial1_disp', 'trial2_disp', 'trial_variance',
+             'jitter_x', 'jitter_y',
+             't_load_s', 't_sim1_s', 't_sim2_s',
+             'temp_min_c', 'temp_max_c', 'temp_mean_c',
+             'clk_ratio_min', 'clk_ratio_mean']
+        )
         csv_writer.writerow(header)
         csv_file.flush()
+
+    # Prepare thermal log CSV
+    thermal_path = os.path.join(OUTPUT_DIR, 'thermal_log.csv')
+    thermal_exists = os.path.exists(thermal_path) and start_gen > 0
+    thermal_file = open(thermal_path, 'a', newline='')
+    thermal_writer = csv.writer(thermal_file)
+    if not thermal_exists:
+        thermal_writer.writerow(['phase', 'generation', 'elapsed_s',
+                                 'temp_c', 'clock_mhz', 'max_clock_mhz', 'clock_ratio'])
+        thermal_file.flush()
+
+    monitor = ThermalMonitor(poll_interval=2.0)
 
     print(f"\nStarting evolution: popsize={POPSIZE}, generations={generations}, "
           f"steps/eval={STEPS_PER_EVAL}")
     print(f"Output directory: {OUTPUT_DIR}")
+    print(f"Thermal management: {'ENABLED' if THERMAL_ENABLE else 'DISABLED'} "
+          f"(pause>{THERMAL_PAUSE_TEMP}°C resume<{THERMAL_RESUME_TEMP}°C)")
     print("-" * 60)
 
     n_invalid_total = 0
@@ -347,27 +485,59 @@ def evolve(generations):
             print(f"CMA-ES stop condition reached at generation {gen}")
             break
 
+        gen_t0 = time.time()
+
         # 1. Get candidate genomes from CMA-ES
         genomes = es.ask()
 
-        # 2. Trial 1: Generate phenotypes and load to GPU
+        # 2. Trial 1: load phenotypes + run simulation (monitored)
         t0 = time.time()
-        muscle_counts_1, batch_stats_1 = load_batch(genomes)
+        muscle_counts_1, batch_stats_1, jitters_1 = load_batch(genomes)
         t_load = time.time() - t0
 
-        # 3. Trial 1: Run physics simulation (GPU, headless)
+        monitor.start()
         t0 = time.time()
         sim_results_1 = sim.run_batch_headless(STEPS_PER_EVAL)
-        t_sim = time.time() - t0
+        t_sim1 = time.time() - t0
+        therm_records_1 = monitor.stop()
 
-        # Trial 2: Same genomes with small spawn jitter for stochasticity
+        # Log trial-1 thermal records
+        for elapsed, temp, clock, max_clock in therm_records_1:
+            ratio = clock / max_clock if max_clock > 0 else 1.0
+            thermal_writer.writerow(['sim1', gen, f'{elapsed:.1f}',
+                                     temp, clock, max_clock, f'{ratio:.3f}'])
+        thermal_file.flush()
+
+        # 3. Trial 2: jittered spawn
         t0 = time.time()
-        muscle_counts_2, batch_stats_2 = load_batch(genomes, spawn_jitter=0.002)
+        muscle_counts_2, batch_stats_2, jitters_2 = load_batch(genomes, spawn_jitter=0.002)
         t_load += time.time() - t0
 
+        monitor.start()
         t0 = time.time()
         sim_results_2 = sim.run_batch_headless(STEPS_PER_EVAL)
-        t_sim += time.time() - t0
+        t_sim2 = time.time() - t0
+        therm_records_2 = monitor.stop()
+
+        # Log trial-2 thermal records
+        for elapsed, temp, clock, max_clock in therm_records_2:
+            ratio = clock / max_clock if max_clock > 0 else 1.0
+            thermal_writer.writerow(['sim2', gen, f'{elapsed:.1f}',
+                                     temp, clock, max_clock, f'{ratio:.3f}'])
+        thermal_file.flush()
+
+        # Aggregate thermal summary across both trials
+        all_therm = therm_records_1 + therm_records_2
+        if all_therm:
+            temps  = [r[1] for r in all_therm]
+            ratios = [r[2] / r[3] if r[3] > 0 else 1.0 for r in all_therm]
+            therm_summary = {
+                'temp_min': min(temps), 'temp_max': max(temps), 'temp_mean': np.mean(temps),
+                'clk_min': min(ratios), 'clk_mean': np.mean(ratios),
+            }
+        else:
+            therm_summary = {'temp_min': 0, 'temp_max': 0, 'temp_mean': 0,
+                             'clk_min': 1.0, 'clk_mean': 1.0}
 
         # Mark self-intersecting (either trial invalid → both invalid)
         n_self_intersect = 0
@@ -379,7 +549,7 @@ def evolve(generations):
 
         # Average the two trials
         sim_results, trial_variances = average_batch_results(sim_results_1, sim_results_2)
-        muscle_counts, batch_stats = muscle_counts_1, batch_stats_1
+        muscle_counts = muscle_counts_1
 
         # 4. Compute fitness
         fitness_values = compute_fitness(sim_results, muscle_counts)
@@ -396,14 +566,24 @@ def evolve(generations):
 
         # Per-individual CSV logging
         for ind in range(POPSIZE):
-            disp = sim_results[ind, 2] - sim_results[ind, 0]
-            drift = abs(sim_results[ind, 3] - sim_results[ind, 1])
-            valid = sim_results[ind, 4]
+            disp   = sim_results[ind, 2] - sim_results[ind, 0]
+            drift  = abs(sim_results[ind, 3] - sim_results[ind, 1])
+            valid  = sim_results[ind, 4]
             final_y = sim_results[ind, 2]
-            row = [gen, ind] + list(genomes[ind]) + [
-                -fitness_values[ind], final_y, disp, drift,
-                muscle_counts[ind], int(valid), es.sigma, trial_variances[ind]
-            ]
+            t1_disp = sim_results_1[ind, 2] - sim_results_1[ind, 0]
+            t2_disp = sim_results_2[ind, 2] - sim_results_2[ind, 0]
+            jx, jy = jitters_2[ind][0], jitters_2[ind][1]
+            row = (
+                [gen, ind] + list(genomes[ind]) +
+                [-fitness_values[ind], final_y, disp, drift,
+                 muscle_counts[ind], int(valid), es.sigma,
+                 t1_disp, t2_disp, trial_variances[ind],
+                 f'{jx:.5f}', f'{jy:.5f}',
+                 f'{t_load:.2f}', f'{t_sim1:.2f}', f'{t_sim2:.2f}',
+                 therm_summary['temp_min'], therm_summary['temp_max'],
+                 f'{therm_summary["temp_mean"]:.1f}',
+                 f'{therm_summary["clk_min"]:.3f}', f'{therm_summary["clk_mean"]:.3f}']
+            )
             csv_writer.writerow(row)
         csv_file.flush()
 
@@ -420,15 +600,15 @@ def evolve(generations):
 
         # Console output
         best_alt = sim_results[best_idx, 2]
-        si_str = f" SI: {n_self_intersect}" if n_self_intersect > 0 else ""
+        si_str = f" SI:{n_self_intersect}" if n_self_intersect > 0 else ""
+        clk_pct = f'{therm_summary["clk_mean"]:.0%}'
         print(f"Gen {gen:3d} | Best: {best_fitness:+.4f} | "
-              f"Alt: {best_alt:.4f} | "
-              f"Disp: {best_disp:+.4f} | "
-              f"Sigma: {es.sigma:.4f} | "
-              f"Invalid: {n_invalid}/{POPSIZE}{si_str} | "
-              f"Load: {t_load:.1f}s Sim: {t_sim:.1f}s")
+              f"Alt: {best_alt:.4f} | Disp: {best_disp:+.4f} | "
+              f"Sigma: {es.sigma:.4f} | Invalid: {n_invalid}/{POPSIZE}{si_str} | "
+              f"Sim: {t_sim1:.0f}s+{t_sim2:.0f}s | "
+              f"Temp: {therm_summary['temp_min']:.0f}-{therm_summary['temp_max']:.0f}°C "
+              f"Clk: {clk_pct}")
 
-        # Warn if too many invalids
         if n_invalid > POPSIZE * 0.5:
             print(f"  WARNING: {n_invalid}/{POPSIZE} invalid evaluations this generation")
 
@@ -436,7 +616,11 @@ def evolve(generations):
         if gen % 5 == 0 or gen == generations - 1:
             save_checkpoint(es, gen, history, checkpoint_path)
 
+        # Thermal gate — pause between gens if GPU is too hot
+        thermal_gate(gen, thermal_writer, thermal_file)
+
     csv_file.close()
+    thermal_file.close()
 
     # Final summary
     print("\n" + "=" * 60)
@@ -462,7 +646,7 @@ def eval_aurelia(web_palette=False):
 
     # Fill all 16 instances with the same Aurelia genome
     genomes = [AURELIA_GENOME] * POPSIZE
-    muscle_counts, batch_stats = load_batch(genomes)
+    muscle_counts, batch_stats, _ = load_batch(genomes)
 
     print(f"  Muscle count: {muscle_counts[0]}")
     print(f"  Robot particles: {batch_stats[0]['n_robot']}")
@@ -648,7 +832,13 @@ def main():
                         help="CSV log file to read (use with --sim-gen)")
     parser.add_argument('--frames', type=int, default=100,
                         help="Number of frames to render (use with --sim-gen, default: 100)")
+    parser.add_argument('--no-thermal', action='store_true',
+                        help="Disable thermal management (no pause between generations)")
     args = parser.parse_args()
+
+    if args.no_thermal:
+        global THERMAL_ENABLE
+        THERMAL_ENABLE = False
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
