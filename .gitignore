@@ -14,3 +14,7 @@ output/
 *.txt
 *.pkl
 *.csv
+
+#documentation files
+storage/
+report/
