@@ -15,16 +15,7 @@ dependencies = [
     "shapely>=2.0.0",
     "mapbox-earcut>=2.0.0",
     "pymeshlab>=2025.7.post1",
-]
-
-[project.optional-dependencies]
-simulation = [
-    "taichi>=1.7.0",
-    "imageio[ffmpeg]>=2.37.2",
-    "opencv-python>=4.13.0.92",
-    "cma>=4.0.0",
-]
-all = [
+    "vastai>=0.2.8",
     "taichi>=1.7.0",
     "imageio[ffmpeg]>=2.37.2",
     "opencv-python>=4.13.0.92",

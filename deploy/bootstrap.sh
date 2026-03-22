@@ -56,7 +56,7 @@ echo "  OK — $(git log --oneline -1)"
 echo ""
 echo "=== [4/6] Installing Python deps ==="
 cd "$WORKDIR"
-uv sync --extra all
+uv sync
 echo "  OK"
 
 echo ""
