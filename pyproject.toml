@@ -5,18 +5,21 @@ description = "2D differentiable MPM simulation for jellyfish-inspired soft robo
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # Simulation core — all that's needed to run evolve.py on a cloud GPU
+    # Simulation core — the only deps needed to run evolve.py headless on a cloud GPU
     "numpy>=1.24.0",
     "scipy>=1.10.0",
-    "pillow>=10.0.0",
-    "matplotlib>=3.10.8",
     "taichi>=1.7.0",
-    "imageio[ffmpeg]>=2.37.2",
-    "opencv-python>=4.13.0.92",
     "cma>=4.0.0",
 ]
 
 [project.optional-dependencies]
+render = [
+    # Needed for --view, --aurelia, plot_thermal.py
+    "pillow>=10.0.0",
+    "matplotlib>=3.10.8",
+    "imageio[ffmpeg]>=2.37.2",
+    "opencv-python>=4.13.0.92",
+]
 web = [
     "flask>=3.0.0",
     "moviepy>=2.2.1",
@@ -31,6 +34,10 @@ deploy = [
     "vastai>=0.2.8",
 ]
 all = [
+    "pillow>=10.0.0",
+    "matplotlib>=3.10.8",
+    "imageio[ffmpeg]>=2.37.2",
+    "opencv-python>=4.13.0.92",
     "flask>=3.0.0",
     "moviepy>=2.2.1",
     "trimesh>=4.0.0",
