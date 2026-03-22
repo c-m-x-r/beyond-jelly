@@ -40,6 +40,7 @@ Three main components, fully integrated:
 
 3. **evolve.py** - Evolutionary optimizer (CMA-ES)
    - `--gens N`: set generation count
+   - `--run-id TAG`: unique tag → outputs go to `output/<TAG>/` (default: timestamp). Enables multiple parallel runs on one GPU without file conflicts.
    - `--view`: render best genomes as 4x4 grid video
    - `--view --gen N`: render specific generation
    - `--aurelia`: evaluate moon jelly reference genome + render video
@@ -107,8 +108,14 @@ uv run python evolve.py --gens 5
 # Full 50-generation run (~60 min)
 uv run python evolve.py
 
-# Resume from checkpoint (automatic if output/checkpoint.pkl exists)
-uv run python evolve.py --gens 50
+# Resume from checkpoint (automatic if output/<run-id>/checkpoint.pkl exists)
+uv run python evolve.py --gens 50 --run-id my_run
+
+# Run 4 independent evolution loops in parallel (different seeds, same GPU)
+uv run python evolve.py --gens 50 --run-id run_a --no-thermal &
+uv run python evolve.py --gens 50 --run-id run_b --no-thermal &
+uv run python evolve.py --gens 50 --run-id run_c --no-thermal &
+uv run python evolve.py --gens 50 --run-id run_d --no-thermal &
 
 # Render best genomes as 4x4 video (rows=generations, columns=color-coded)
 uv run python evolve.py --view
@@ -158,7 +165,7 @@ cd web && python app.py   # http://localhost:5000
 
 ## Output Files
 
-All outputs in `output/` directory:
+All outputs in `output/<run-id>/` directory (auto-timestamped if `--run-id` not given):
 
 | File | Description |
 |------|-------------|

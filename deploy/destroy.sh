@@ -23,7 +23,7 @@ echo "======================================================"
 
 echo ""
 echo "=== Final output sync ==="
-bash "$SCRIPT_DIR/sync_output.sh" "$SSH_HOST" "$SSH_PORT"
+bash "$SCRIPT_DIR/sync_output.sh" "$SSH_HOST" "$SSH_PORT"  # syncs all run_* dirs
 
 echo ""
 read -rp "Sync complete. Destroy instance $INSTANCE_ID? [y/N] " confirm

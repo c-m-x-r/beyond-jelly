@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import numpy as np
 import cma
 import time
@@ -834,7 +835,15 @@ def main():
                         help="Number of frames to render (use with --sim-gen, default: 100)")
     parser.add_argument('--no-thermal', action='store_true',
                         help="Disable thermal management (no pause between generations)")
+    parser.add_argument('--run-id', type=str, default=None,
+                        help="Unique tag for this run. OUTPUT_DIR becomes output/<TAG>/. "
+                             "Default: auto-generated timestamp (YYYYMMDD_HHMMSS). "
+                             "Use to run multiple parallel evolution loops without file conflicts.")
     args = parser.parse_args()
+
+    global OUTPUT_DIR
+    tag = args.run_id if args.run_id is not None else datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    OUTPUT_DIR = os.path.join("output", tag)
 
     if args.no_thermal:
         global THERMAL_ENABLE
