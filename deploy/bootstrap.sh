@@ -25,7 +25,7 @@ echo "======================================================"
 echo ""
 echo "=== [1/6] System deps ==="
 apt-get update -qq
-apt-get install -y -qq ffmpeg tmux rsync curl git
+apt-get install -y -qq ffmpeg tmux rsync curl git python3 python3-pip
 echo "  OK"
 
 echo ""
