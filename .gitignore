@@ -15,6 +15,13 @@ output/
 *.pkl
 *.csv
 
+<<<<<<< Updated upstream
 #documentation files
 storage/
 report/
+=======
+# Notes
+
+storage/
+documents/
+>>>>>>> Stashed changes

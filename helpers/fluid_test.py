@@ -13,6 +13,8 @@ Usage:
 import argparse
 import numpy as np
 import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import imageio.v3 as iio
 import taichi as ti
 import mpm_sim as sim

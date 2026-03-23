@@ -11,6 +11,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "flask>=3.0.0",
     "moviepy>=2.2.1",
+    "imageio[ffmpeg]>=2.37.2",
     "trimesh>=4.0.0",
     "shapely>=2.0.0",
     "mapbox-earcut>=2.0.0",
@@ -21,13 +22,6 @@ dependencies = [
 [project.optional-dependencies]
 simulation = [
     "taichi>=1.7.0",
-    "imageio[ffmpeg]>=2.37.2",
-    "opencv-python>=4.13.0.92",
-    "cma>=4.0.0",
-]
-all = [
-    "taichi>=1.7.0",
-    "imageio[ffmpeg]>=2.37.2",
     "opencv-python>=4.13.0.92",
     "cma>=4.0.0",
 ]

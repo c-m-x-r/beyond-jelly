@@ -124,18 +124,18 @@ uv run python make_jelly.py
 uv run python make_jelly.py --aurelia  # Moon jelly reference
 
 # Fluid dynamics test visualization
-uv run python fluid_test.py
+uv run python helpers/fluid_test.py
 
 # Payload sink baseline (no jellyfish, shows payload sinking under gravity)
-uv run python payload_sink.py
+uv run python helpers/payload_sink.py
 
 # CAD export: generate STL files from a genome
-uv run python make_cad.py --aurelia           # Aurelia reference
-uv run python make_cad.py --gen 5             # Best genome from generation 5
-uv run python make_cad.py --diameter 120      # Physical scale in mm
+uv run python helpers/make_cad.py --aurelia           # Aurelia reference
+uv run python helpers/make_cad.py --gen 5             # Best genome from generation 5
+uv run python helpers/make_cad.py --diameter 120      # Physical scale in mm
 
 # Side-by-side comparison video (Aurelia vs Gen 0 vs Gen N)
-uv run python make_comparison.py
+uv run python helpers/make_comparison.py
 
 # Web viewer (morphology explorer + evolutionary history)
 cd web && python app.py   # http://localhost:5000
@@ -148,13 +148,14 @@ cd web && python app.py   # http://localhost:5000
 | mpm_sim.py | MPM physics engine + renderer + fitness kernels |
 | make_jelly.py | Morphology generator + tank filler + Aurelia reference |
 | evolve.py | CMA-ES evolutionary loop + visualization + Aurelia eval |
-| fluid_test.py | Fluid dynamics test visualization (oscillating paddle) |
-| make_cad.py | CAD export: genome → STL (extruded cross-section + revolved solid) |
-| make_comparison.py | Side-by-side comparison video: Aurelia vs Gen 0 vs Gen N |
-| payload_sink.py | Baseline demo: payload sinking without jellyfish (buoyancy check) |
 | run_population.py | Batch population runner with CV2 rendering |
 | web/ | Flask web viewer: genome sliders, morphology preview, evolutionary history |
 | pyproject.toml | Dependencies (taichi, numpy, scipy, cma, imageio, trimesh, flask, etc.) |
+| **helpers/** | Utility scripts (not required for core evolution loop) |
+| helpers/fluid_test.py | Fluid dynamics test visualization (oscillating paddle) |
+| helpers/make_cad.py | CAD export: genome → STL (extruded cross-section + revolved solid) |
+| helpers/make_comparison.py | Side-by-side comparison video: Aurelia vs Gen 0 vs Gen N |
+| helpers/payload_sink.py | Baseline demo: payload sinking without jellyfish (buoyancy check) |
 
 ## Output Files
 
