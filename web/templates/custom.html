@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Design Your Jellyfish — Beyond Jelly</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="custom-page">
+    <div class="container">
+
+        <header class="custom-header">
+            <div class="header-top">
+                <h1>BEYOND JELLY: Design Your Own</h1>
+                <nav class="site-nav">
+                    <a href="/" class="nav-link">Genome Viewer</a>
+                    <a href="/custom" class="nav-link active">Design Yours</a>
+                </nav>
+            </div>
+        </header>
+
+        <!-- ── STEP 1: Design + Name + Color ── -->
+        <div class="wizard-step active" id="step-1">
+            <div class="step-row">
+                <div class="step-dots">
+                    <span class="step-dot active" data-step="1"></span>
+                    <span class="step-dot" data-step="2"></span>
+                    <span class="step-dot" data-step="3"></span>
+                </div>
+                <span class="step-title">Design, Name &amp; Color</span>
+                <span class="step-sub">Shape your jellyfish and give it an identity — then join the aquarium</span>
+            </div>
+
+            <div class="custom-layout">
+
+                <!-- Controls: sliders + colors -->
+                <section class="panel custom-controls">
+                    <div class="actions">
+                        <button id="btn-randomize" class="btn">Randomize</button>
+                    </div>
+
+                    <div class="gene-controls" id="custom-gene-controls"></div>
+
+                    <div class="controls-colors">
+                        <div class="form-field">
+                            <label for="jelly-color">Jelly</label>
+                            <div class="color-row">
+                                <input type="color" id="jelly-color" value="#4ECDC4">
+                                <span class="color-label" id="jelly-color-label">#4ECDC4</span>
+                            </div>
+                        </div>
+                        <div class="form-field">
+                            <label for="muscle-color">Muscle</label>
+                            <div class="color-row">
+                                <input type="color" id="muscle-color" value="#FF6B6B">
+                                <span class="color-label" id="muscle-color-label">#FF6B6B</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Viewer: name floats over the top of the render -->
+                <section class="panel viewer custom-viewer">
+                    <div class="canvas-container">
+                        <input type="text" id="jelly-name" class="name-overlay"
+                               maxlength="60" placeholder="Name your jellyfish..." autocomplete="off">
+                        <div id="custom-loading" class="loading">Rendering...</div>
+                        <img id="custom-morphology-img" src="" alt="Jellyfish morphology preview">
+                        <svg id="custom-bezier-overlay"
+                             viewBox="0 0 1 1"
+                             preserveAspectRatio="xMidYMid meet"
+                             class="bezier-overlay"
+                             xmlns="http://www.w3.org/2000/svg">
+                        </svg>
+                    </div>
+                    <span class="name-hint-below" id="name-hint"></span>
+                </section>
+
+                <!-- Aquarium column -->
+                <section class="panel aquarium-col">
+                    <h2>Aquarium <span class="aquarium-count" id="aquarium-count"></span></h2>
+                    <p class="aquarium-desc">Designs from other participants</p>
+                    <div class="aquarium-grid" id="aquarium-grid">
+                        <div class="aquarium-empty" id="aquarium-empty">Loading...</div>
+                    </div>
+                </section>
+
+            </div><!-- .custom-layout -->
+
+            <div class="wizard-nav">
+                <span></span>
+                <button class="btn btn-primary" id="btn-step1-next">Next: Email (optional) →</button>
+            </div>
+        </div>
+
+        <!-- ── STEP 2: Email ── -->
+        <div class="wizard-step" id="step-2">
+            <div class="step-row">
+                <div class="step-dots">
+                    <span class="step-dot done" data-step="1"></span>
+                    <span class="step-dot active" data-step="2"></span>
+                    <span class="step-dot" data-step="3"></span>
+                </div>
+                <span class="step-title">Optional: Stay in the loop</span>
+                <span class="step-sub">We'll run your jellyfish in a real simulation after the event</span>
+            </div>
+
+            <section class="panel step-form-panel">
+                <div class="email-pitch">
+                    <p>Want to see how your jellyfish actually performs? Leave your email and we'll send the simulation result once — just the result, nothing else.</p>
+                </div>
+                <div class="form-field">
+                    <label for="contact-email">Email address <span class="optional-label">(optional — skip if you prefer)</span></label>
+                    <input type="email" id="contact-email" placeholder="you@example.com" autocomplete="email">
+                </div>
+            </section>
+
+            <div class="wizard-nav">
+                <button class="btn btn-secondary" id="btn-step2-back">← Back</button>
+                <button class="btn btn-primary btn-submit" id="btn-submit">Submit My Jellyfish</button>
+            </div>
+        </div>
+
+        <!-- ── STEP 3: Results ── -->
+        <div class="wizard-step" id="step-3">
+            <div class="step-row">
+                <div class="step-dots">
+                    <span class="step-dot done" data-step="1"></span>
+                    <span class="step-dot done" data-step="2"></span>
+                    <span class="step-dot active" data-step="3"></span>
+                </div>
+                <span class="step-title">Your jellyfish is in the queue!</span>
+                <span class="step-sub">It'll be simulated after the event — here's our best prediction in the meantime</span>
+            </div>
+
+            <div class="results-grid">
+                <section class="panel results-preview">
+                    <div class="canvas-container canvas-container--small">
+                        <img id="result-preview-img" src="" alt="Your jellyfish">
+                    </div>
+                    <p class="result-name" id="result-name"></p>
+                </section>
+
+                <section class="panel prediction-panel" id="prediction-panel">
+                    <h2>Predicted Performance</h2>
+                    <div id="prediction-content">
+                        <div class="prediction-stat">
+                            <span class="pred-label">Estimated upward displacement</span>
+                            <span class="pred-value" id="pred-displacement">—</span>
+                        </div>
+                        <div class="prediction-stat">
+                            <span class="pred-label">Fitness percentile</span>
+                            <span class="pred-value" id="pred-percentile">—</span>
+                        </div>
+                        <div class="percentile-bar-wrap">
+                            <div class="percentile-bar">
+                                <div class="percentile-fill" id="percentile-fill"></div>
+                            </div>
+                        </div>
+                        <div class="prediction-stat">
+                            <span class="pred-label">Nearest generation</span>
+                            <span class="pred-value" id="pred-generation">—</span>
+                        </div>
+                        <div class="prediction-stat">
+                            <span class="pred-label">Genomes compared</span>
+                            <span class="pred-value" id="pred-total">—</span>
+                        </div>
+                        <p class="prediction-disclaimer">
+                            Estimate based on nearest-neighbour similarity to previously simulated genomes. Your actual result may differ.
+                        </p>
+                    </div>
+                    <div id="prediction-unavailable" class="hidden">
+                        <p class="prediction-disclaimer">No simulation data available yet — check back after the event!</p>
+                    </div>
+                </section>
+            </div>
+
+            <div class="wizard-nav wizard-nav--center">
+                <button class="btn btn-primary" id="btn-design-another">Design Another</button>
+            </div>
+        </div>
+
+        <footer>
+            <p>CMA-ES evolutionary optimization · Material Point Method simulation</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='custom.js') }}"></script>
+</body>
+</html>

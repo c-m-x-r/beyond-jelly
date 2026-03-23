@@ -300,6 +300,31 @@ header p {
     display: none;
 }
 
+/* Bezier Overlay */
+.bezier-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    z-index: 5;
+}
+
+.bezier-overlay .bz-handle {
+    cursor: grab;
+    transition: r 0.1s ease;
+}
+
+.bezier-overlay .bz-handle:hover {
+    r: 0.016;
+}
+
+.bezier-overlay .bz-handle.dragging {
+    cursor: grabbing;
+    r: 0.018;
+}
+
 /* Stats */
 .stats dl {
     display: grid;
@@ -387,6 +412,23 @@ header p {
     font-size: 0.75rem;
     color: var(--muted);
     font-family: var(--font-mono);
+}
+
+/* Convergence Chart */
+.convergence-chart-wrap {
+    margin-bottom: var(--space-md);
+    border: 1px solid var(--border);
+    background: white;
+}
+
+.convergence-chart-wrap.hidden {
+    display: none;
+}
+
+#convergence-chart {
+    display: block;
+    width: 100%;
+    height: 200px;
 }
 
 /* Individual Table */
@@ -575,3 +617,473 @@ footer p {
         flex-wrap: wrap;
     }
 }
+
+/* ── Navigation ── */
+.header-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-md);
+}
+
+.site-nav {
+    display: flex;
+    gap: var(--space-xs);
+    flex-shrink: 0;
+    margin-top: 0.3rem;
+}
+
+.nav-link {
+    padding: 0.3rem 0.75rem;
+    border: 1px solid var(--border);
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--muted);
+    text-decoration: none;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.nav-link:hover, .nav-link.active {
+    background: var(--fg);
+    color: white;
+    border-color: var(--fg);
+}
+
+/* ── Custom page: tighter header, no bottom rule ── */
+.custom-page header {
+    margin-bottom: var(--space-md);
+    border-bottom: none;
+    padding-bottom: 0;
+}
+
+.custom-page header h1 {
+    font-size: 1.6rem;
+}
+
+/* ── Step row: dots + title + subtitle on one line ── */
+.step-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-bottom: var(--space-md);
+    padding-bottom: var(--space-sm);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+}
+
+.step-dots {
+    display: flex;
+    gap: 0.35rem;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+.step-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    transition: background 0.2s ease, width 0.1s, height 0.1s;
+}
+
+.step-dot.done { background: var(--muted); }
+
+.step-dot.active {
+    background: var(--accent);
+    width: 10px;
+    height: 10px;
+}
+
+.step-title {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--fg);
+    flex-shrink: 0;
+}
+
+.step-sub {
+    font-size: 0.78rem;
+    color: var(--muted);
+}
+
+/* ── Wizard steps ── */
+.wizard-step { display: none; }
+.wizard-step.active { display: block; }
+
+/* ── 3-column layout: controls | viewer | aquarium ── */
+.custom-layout {
+    display: grid;
+    grid-template-columns: 260px 1fr 200px;
+    gap: var(--space-md);
+    align-items: start;
+    margin-bottom: var(--space-md);
+}
+
+@media (max-width: 1100px) {
+    .custom-layout {
+        grid-template-columns: 240px 1fr;
+    }
+    .aquarium-col {
+        grid-column: 1 / -1;
+    }
+    .aquarium-col .aquarium-grid {
+        grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+        max-height: none;
+    }
+}
+
+@media (max-width: 700px) {
+    .custom-layout { grid-template-columns: 1fr; }
+    .aquarium-col  { grid-column: 1; }
+}
+
+/* ── Custom controls: compact gene sliders ── */
+.custom-controls .gene-controls {
+    gap: 0.35rem;
+    margin-bottom: var(--space-sm);
+}
+
+.custom-controls .gene-control label {
+    font-size: 0.7rem;
+}
+
+.custom-controls .gene-control .value {
+    font-size: 0.78rem;
+}
+
+/* ── Custom viewer: square container matches the square Python render ── */
+.custom-viewer .canvas-container {
+    aspect-ratio: 1/1;
+    width: 100%;
+    position: relative;
+}
+
+/* Name field floating over the top of the preview */
+.name-overlay {
+    position: absolute;
+    top: var(--space-sm);
+    left: var(--space-sm);
+    right: var(--space-sm);
+    z-index: 10;
+    background: rgba(250, 250, 250, 0.88);
+    border: 1px solid rgba(0, 0, 0, 0.14);
+    padding: 0.45rem 0.7rem;
+    font-size: 1rem;
+    font-family: var(--font-sans);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    width: calc(100% - 2 * var(--space-sm));
+}
+
+.name-overlay:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.96);
+}
+
+.name-overlay::placeholder {
+    color: var(--muted);
+    font-style: italic;
+}
+
+.name-hint-below {
+    display: block;
+    font-size: 0.72rem;
+    color: var(--highlight);
+    margin-top: 0.2rem;
+    min-height: 1em;
+}
+
+/* ── Aquarium column ── */
+.aquarium-col {
+    display: flex;
+    flex-direction: column;
+    max-height: 480px;
+    overflow: hidden;
+}
+
+.aquarium-col h2 {
+    flex-shrink: 0;
+}
+
+.aquarium-count {
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-weight: 400;
+    margin-left: 0.2rem;
+}
+
+.aquarium-desc {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-bottom: 0.5rem;
+    flex-shrink: 0;
+}
+
+.aquarium-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.4rem;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
+    align-content: start;
+}
+
+.aquarium-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.2rem;
+}
+
+.aquarium-item img {
+    width: 100%;
+    aspect-ratio: 3/4;
+    object-fit: contain;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    transition: border-color 0.15s ease;
+}
+
+.aquarium-item img:hover { border-color: var(--accent); }
+
+.aquarium-item figcaption {
+    font-size: 0.65rem;
+    color: var(--fg);
+    text-align: center;
+    word-break: break-word;
+    line-height: 1.2;
+}
+
+.aquarium-empty {
+    color: var(--muted);
+    font-size: 0.8rem;
+    font-style: italic;
+    grid-column: 1 / -1;
+    padding: var(--space-sm) 0;
+}
+
+/* ── Color pickers below gene sliders ── */
+.controls-colors {
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-sm);
+    margin-top: var(--space-xs);
+    display: flex;
+    gap: var(--space-sm);
+}
+
+.controls-colors .form-field {
+    flex: 1;
+    margin-bottom: 0;
+}
+
+/* ── Shared form elements ── */
+.form-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    margin-bottom: var(--space-sm);
+}
+
+.form-field label {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.form-field input[type="text"],
+.form-field input[type="email"] {
+    padding: 0.45rem var(--space-sm);
+    border: 1px solid var(--border);
+    font-family: var(--font-sans);
+    font-size: 0.9rem;
+    background: var(--bg);
+    width: 100%;
+}
+
+.form-field input[type="text"]:focus,
+.form-field input[type="email"]:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.required { color: var(--highlight); }
+
+.optional-label {
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+}
+
+.field-hint {
+    font-size: 0.72rem;
+    color: var(--highlight);
+    min-height: 1em;
+}
+
+.color-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.color-row input[type="color"] {
+    width: 36px;
+    height: 28px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    padding: 2px;
+    background: white;
+}
+
+.color-label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--muted);
+}
+
+/* ── Wizard nav ── */
+.wizard-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: var(--space-md);
+    padding-top: var(--space-sm);
+    border-top: 1px solid var(--border);
+}
+
+.wizard-nav--center { justify-content: center; }
+
+.btn-primary {
+    background: var(--fg);
+    color: white;
+    border-color: var(--fg);
+    padding: 0.55rem 1.2rem;
+    font-size: 0.9rem;
+}
+
+.btn-primary:hover {
+    background: #333;
+    border-color: #333;
+    color: white;
+}
+
+.btn-submit {
+    font-size: 0.95rem;
+    padding: 0.65rem 1.5rem;
+}
+
+/* ── Email step ── */
+.step-form-panel { max-width: 520px; }
+
+.email-pitch {
+    background: #F0F9F8;
+    border-left: 3px solid var(--accent);
+    padding: var(--space-md);
+    margin-bottom: var(--space-md);
+    font-size: 0.9rem;
+    line-height: 1.7;
+}
+
+/* ── Results / Step 3 ── */
+.results-grid {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: var(--space-lg);
+    align-items: start;
+}
+
+@media (max-width: 700px) {
+    .results-grid { grid-template-columns: 1fr; }
+}
+
+.results-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.canvas-container--small {
+    width: 100%;
+    aspect-ratio: 3/4;
+    background: var(--bg);
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+
+.canvas-container--small img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.result-name {
+    font-size: 1rem;
+    font-weight: 400;
+    color: var(--fg);
+    text-align: center;
+}
+
+/* ── Prediction panel ── */
+.prediction-panel { border-left: 3px solid var(--accent); }
+
+.prediction-stat {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border);
+}
+
+.pred-label {
+    font-size: 0.72rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+}
+
+.pred-value {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    color: var(--fg);
+    text-align: right;
+}
+
+.percentile-bar-wrap { padding: 0.5rem 0; }
+
+.percentile-bar {
+    width: 100%;
+    height: 5px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.percentile-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.6s ease;
+    width: 0%;
+}
+
+.prediction-disclaimer {
+    margin-top: var(--space-sm);
+    font-size: 0.72rem;
+    color: var(--muted);
+    font-style: italic;
+    line-height: 1.6;
+}
+
+.hidden { display: none !important; }

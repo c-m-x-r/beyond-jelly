@@ -10,7 +10,13 @@
     <div class="container">
         <!-- Header -->
         <header>
-            <h1>BEYOND JELLY: Evolutionary Optimization of Non-Biomimetic Soft Robotic Geometries</h1>
+            <div class="header-top">
+                <h1>BEYOND JELLY: Evolutionary Optimization of Non-Biomimetic Soft Robotic Geometries</h1>
+                <nav class="site-nav">
+                    <a href="/" class="nav-link active">Genome Viewer</a>
+                    <a href="/custom" class="nav-link">Design Yours</a>
+                </nav>
+            </div>
             <p>Soft robotic jellyfish morphology explorer</p>
         </header>
 
@@ -47,6 +53,12 @@
                 <div class="canvas-container">
                     <div id="loading" class="loading">Rendering...</div>
                     <img id="morphology-img" src="" alt="Jellyfish morphology">
+                    <svg id="bezier-overlay"
+                         viewBox="0 0 1 1"
+                         preserveAspectRatio="xMidYMid meet"
+                         class="bezier-overlay"
+                         xmlns="http://www.w3.org/2000/svg">
+                    </svg>
                 </div>
             </section>
 
@@ -107,6 +119,11 @@
                         <div class="sim-progress-fill" id="sim-progress-fill"></div>
                     </div>
                 </div>
+            </div>
+
+            <!-- Convergence Chart -->
+            <div class="convergence-chart-wrap hidden" id="convergence-chart-wrap">
+                <canvas id="convergence-chart"></canvas>
             </div>
 
             <div class="evo-table-wrap">
