@@ -286,9 +286,10 @@ def view_best(gen_idx=None, web_palette=False):
 def evolve(generations):
     """Run the evolutionary loop."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    checkpoint_path = os.path.join(OUTPUT_DIR, "checkpoint.pkl")
-    csv_path = os.path.join(OUTPUT_DIR, "evolution_log.csv")
-    json_path = os.path.join(OUTPUT_DIR, "best_genomes.json")
+    run_id = os.path.basename(os.path.abspath(OUTPUT_DIR))
+    checkpoint_path = os.path.join(OUTPUT_DIR, f"checkpoint_{run_id}.pkl")
+    csv_path = os.path.join(OUTPUT_DIR, f"evolution_log_{run_id}.csv")
+    json_path = os.path.join(OUTPUT_DIR, f"best_genomes_{run_id}.json")
 
     # Try to resume from checkpoint
     resumed = load_checkpoint(checkpoint_path)
@@ -519,7 +520,9 @@ def sim_generation(gen, log_file='evolution_log.csv', n_frames=100,
     """
     import imageio.v3 as iio
 
-    csv_path = os.path.join(OUTPUT_DIR, log_file)
+    # log_file may be relative to base output/ dir (e.g. "run_id/evolution_log_run_id.csv")
+    base_output = os.path.dirname(os.path.abspath(OUTPUT_DIR))
+    csv_path = os.path.join(base_output, log_file)
     if not os.path.exists(csv_path):
         print(f"Error: {csv_path} not found")
         return None
@@ -552,11 +555,12 @@ def sim_generation(gen, log_file='evolution_log.csv', n_frames=100,
     print("Loading phenotypes...", flush=True)
     load_batch(genomes)
 
-    # Rendering setup
-    log_stem = os.path.splitext(log_file)[0]
+    # Rendering setup — use just the filename stem (strip any subdirectory from log_file)
+    log_stem = os.path.splitext(os.path.basename(log_file))[0]
     video_name = f"sim_{log_stem}_gen{gen}.mp4"
     video_path = os.path.join(OUTPUT_DIR, video_name)
-    status_path = os.path.join(OUTPUT_DIR, "sim_status.json")
+    # Status file goes to base output/ dir so Flask can poll it regardless of run subdir
+    status_path = os.path.join(base_output, "sim_status.json")
 
     total_steps = n_frames * VIEW_RENDER_EVERY
     radius = max(1.0, sim.res_sub / sim.n_grid * 0.6)

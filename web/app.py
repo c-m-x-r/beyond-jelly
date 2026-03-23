@@ -136,11 +136,14 @@ def api_bounds():
     })
 
 
-def parse_evolution_log(filename='evolution_log.csv'):
-    """Parse an evolution log CSV and return list of dicts."""
-    # Sanitize: only allow filenames, no path components
-    filename = Path(filename).name
-    csv_path = OUTPUT_DIR / filename
+def parse_evolution_log(rel_path='evolution_log.csv'):
+    """Parse an evolution log CSV and return list of dicts.
+    rel_path is relative to OUTPUT_DIR (may include subdirectory).
+    """
+    # Security: resolve and ensure the path stays within OUTPUT_DIR
+    csv_path = (OUTPUT_DIR / rel_path).resolve()
+    if not str(csv_path).startswith(str(OUTPUT_DIR.resolve())):
+        return []
     if not csv_path.exists():
         return []
     rows = []
@@ -167,14 +170,14 @@ def parse_evolution_log(filename='evolution_log.csv'):
 
 @app.route('/api/evolution/logs', methods=['GET'])
 def api_evolution_logs():
-    """List available evolution log files."""
-    logs = sorted(OUTPUT_DIR.glob('*evolution_log*.csv'))
+    """List available evolution log files (searches recursively inside output/)."""
+    logs = sorted(OUTPUT_DIR.rglob('*evolution_log*.csv'))
     result = []
     for p in logs:
-        # Skip backup copies with spaces in name
         if ' ' in p.name:
             continue
-        result.append(p.name)
+        # Return path relative to OUTPUT_DIR so subdirectories are preserved
+        result.append(str(p.relative_to(OUTPUT_DIR)))
     return jsonify({'logs': result})
 
 
@@ -191,16 +194,19 @@ def api_evolution_summary():
         g = r['generation']
         if g not in gens:
             gens[g] = {'generation': g, 'count': 0, 'best_fitness': -1e9,
-                       'avg_fitness': 0, 'sigma': r['sigma']}
+                       'avg_fitness': 0, 'valid_count': 0, 'sigma': r['sigma']}
         gens[g]['count'] += 1
-        gens[g]['avg_fitness'] += r['fitness']
+        if r['valid']:
+            gens[g]['avg_fitness'] += r['fitness']
+            gens[g]['valid_count'] += 1
         if r['fitness'] > gens[g]['best_fitness']:
             gens[g]['best_fitness'] = r['fitness']
 
     gen_list = []
     for g in sorted(gens.keys()):
         info = gens[g]
-        info['avg_fitness'] = info['avg_fitness'] / info['count']
+        vc = info.pop('valid_count')
+        info['avg_fitness'] = info['avg_fitness'] / vc if vc > 0 else info['best_fitness']
         gen_list.append(info)
 
     return jsonify({
@@ -317,11 +323,17 @@ def api_simulate_generation():
     # Sanitize log filename
     log_file = Path(log_file).name
 
+    # Use just the filename stem (no subdir) for the video name
+    log_stem = Path(log_file).stem
+    # Predictable run_id so we know exactly where the video will land
+    sim_run_id = f"sim_{log_stem}_gen{gen}"
+
     cmd = [
         sys.executable, 'evolve.py',
         '--sim-gen', '--gen', str(gen),
         '--log', log_file,
         '--frames', str(n_frames),
+        '--run-id', sim_run_id,
     ]
     if web_palette:
         cmd.append('--web-palette')
@@ -337,8 +349,8 @@ def api_simulate_generation():
         text=True
     )
 
-    log_stem = Path(log_file).stem
-    expected_video = f"sim_{log_stem}_gen{gen}.mp4"
+    # Video lands at output/{sim_run_id}/sim_{log_stem}_gen{gen}.mp4
+    expected_video = f"{sim_run_id}/sim_{log_stem}_gen{gen}.mp4"
 
     return jsonify({
         'status': 'started',
@@ -378,8 +390,11 @@ def api_simulate_status():
 
 @app.route('/api/simulate/video/<path:filename>')
 def api_simulate_video(filename):
-    """Serve a simulation video file."""
-    filename = Path(filename).name  # Sanitize
+    """Serve a simulation video file (supports subdirectory paths within output/)."""
+    # Security: ensure resolved path stays within OUTPUT_DIR
+    target = (OUTPUT_DIR / filename).resolve()
+    if not str(target).startswith(str(OUTPUT_DIR.resolve())):
+        return 'Forbidden', 403
     return send_from_directory(str(OUTPUT_DIR), filename, mimetype='video/mp4')
 
 

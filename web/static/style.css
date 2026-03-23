@@ -300,6 +300,30 @@ header p {
     display: none;
 }
 
+/* Bezier Overlay */
+.bezier-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+}
+
+.bezier-overlay .bz-handle {
+    cursor: grab;
+    transition: r 0.1s ease;
+}
+
+.bezier-overlay .bz-handle:hover {
+    r: 0.016;
+}
+
+.bezier-overlay .bz-handle.dragging {
+    cursor: grabbing;
+    r: 0.018;
+}
+
 /* Stats */
 .stats dl {
     display: grid;
@@ -387,6 +411,23 @@ header p {
     font-size: 0.75rem;
     color: var(--muted);
     font-family: var(--font-mono);
+}
+
+/* Convergence Chart */
+.convergence-chart-wrap {
+    margin-bottom: var(--space-md);
+    border: 1px solid var(--border);
+    background: white;
+}
+
+.convergence-chart-wrap.hidden {
+    display: none;
+}
+
+#convergence-chart {
+    display: block;
+    width: 100%;
+    height: 200px;
 }
 
 /* Individual Table */
