@@ -13,6 +13,9 @@ import base64
 import csv
 import subprocess
 import json
+import uuid
+import re
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -28,6 +31,13 @@ N_PARTICLES = 80000
 GRID_RES = 128
 OUTPUT_DIR = Path(__file__).parent.parent / 'output'
 
+# Custom submissions storage
+CUSTOM_DIR = OUTPUT_DIR / 'custom_submissions'
+CUSTOM_JSON = CUSTOM_DIR / 'submissions.json'
+CUSTOM_THUMBS = CUSTOM_DIR / 'thumbnails'
+CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+CUSTOM_THUMBS.mkdir(parents=True, exist_ok=True)
+
 # Genome bounds
 GENOME_LOWER = [0.0, -0.15, 0.0, -0.2, 0.05, -0.45, 0.025, 0.025, 0.01]
 GENOME_UPPER = [0.25, 0.15, 0.3, 0.15, 0.35, -0.03, 0.08, 0.1, 0.04]
@@ -42,10 +52,14 @@ MATERIAL_COLORS = {
 }
 
 
-def render_morphology(genome, size=(6, 8)):
-    """Render morphology as base64 PNG."""
+def render_morphology(genome, size=(6, 8), colors=None):
+    """Render morphology as base64 PNG. colors dict optionally overrides MATERIAL_COLORS by mat_id."""
     try:
         genome_arr = np.array(genome, dtype=np.float64)
+
+        mat_colors = dict(MATERIAL_COLORS)
+        if colors:
+            mat_colors.update(colors)
 
         # Generate phenotype
         pos, mat, _, stats = fill_tank(genome_arr, N_PARTICLES, grid_res=GRID_RES)
@@ -60,7 +74,7 @@ def render_morphology(genome, size=(6, 8)):
             if np.any(mask):
                 ax.scatter(
                     pos[mask, 0], pos[mask, 1],
-                    c=MATERIAL_COLORS[mat_id],
+                    c=mat_colors[mat_id],
                     s=1.0,
                     alpha=0.8 if mat_id == 0 else 1.0,
                     edgecolors='none',
@@ -396,6 +410,161 @@ def api_simulate_video(filename):
     if not str(target).startswith(str(OUTPUT_DIR.resolve())):
         return 'Forbidden', 403
     return send_from_directory(str(OUTPUT_DIR), filename, mimetype='video/mp4')
+
+
+@app.route('/custom')
+def custom():
+    """Serve the custom jellyfish design page."""
+    return render_template('custom.html')
+
+
+@app.route('/api/custom/render', methods=['POST'])
+def api_custom_render():
+    """Render with custom jelly/muscle colors for the design wizard."""
+    data = request.get_json()
+    genome = data.get('genome', GENOME_DEFAULT)
+    jelly_color = data.get('jelly_color', MATERIAL_COLORS[1])
+    muscle_color = data.get('muscle_color', MATERIAL_COLORS[3])
+    result = render_morphology(genome, colors={1: jelly_color, 3: muscle_color})
+    return jsonify(result)
+
+
+def _load_submissions():
+    if not CUSTOM_JSON.exists():
+        return []
+    try:
+        with open(CUSTOM_JSON, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+
+def _save_submissions(submissions):
+    with open(CUSTOM_JSON, 'w') as f:
+        json.dump(submissions, f, indent=2)
+
+
+def predict_performance(genome):
+    """Find nearest neighbour in evolution logs, return percentile + displacement estimate."""
+    logs = sorted(OUTPUT_DIR.rglob('*evolution_log*.csv'))
+    # Exclude custom-related paths
+    logs = [l for l in logs if 'custom' not in str(l)]
+    if not logs:
+        return None
+    rows = parse_evolution_log(str(logs[-1].relative_to(OUTPUT_DIR)))
+    valid_rows = [r for r in rows if r['valid']]
+    if not valid_rows:
+        return None
+
+    ranges = np.array(GENOME_UPPER) - np.array(GENOME_LOWER)
+    query_norm = (np.array(genome) - np.array(GENOME_LOWER)) / ranges
+    genomes_norm = (np.array([r['genome'] for r in valid_rows]) - np.array(GENOME_LOWER)) / ranges
+    distances = np.linalg.norm(genomes_norm - query_norm, axis=1)
+    nearest = valid_rows[int(np.argmin(distances))]
+
+    all_fitness = [r['fitness'] for r in valid_rows]
+    percentile = float(100 * np.mean(np.array(all_fitness) <= nearest['fitness']))
+
+    return {
+        'nearest_fitness': nearest['fitness'],
+        'displacement': nearest['displacement'],
+        'generation': nearest['generation'],
+        'percentile': round(percentile, 1),
+        'total_individuals': len(valid_rows),
+    }
+
+
+@app.route('/api/custom/submit', methods=['POST'])
+def api_custom_submit():
+    """Accept a user-designed jellyfish submission."""
+    data = request.get_json()
+
+    name = (data.get('name') or '').strip()[:60]
+    if not name:
+        return jsonify({'error': 'Name is required'}), 400
+
+    genome = data.get('genome')
+    if not genome or len(genome) != 9:
+        return jsonify({'error': 'Invalid genome'}), 400
+    for i, v in enumerate(genome):
+        if v < GENOME_LOWER[i] or v > GENOME_UPPER[i]:
+            return jsonify({'error': f'Gene {i} out of bounds'}), 400
+
+    jelly_color = data.get('jelly_color', MATERIAL_COLORS[1])
+    muscle_color = data.get('muscle_color', MATERIAL_COLORS[3])
+
+    # Validate hex colors (basic check)
+    hex_re = re.compile(r'^#[0-9a-fA-F]{6}$')
+    if not hex_re.match(jelly_color) or not hex_re.match(muscle_color):
+        return jsonify({'error': 'Invalid color format'}), 400
+
+    email = (data.get('email') or '').strip()[:254] or None
+
+    submission_id = str(uuid.uuid4())
+    timestamp = datetime.utcnow().isoformat()
+
+    # Render and save thumbnail
+    try:
+        thumb_result = render_morphology(
+            genome, size=(4, 5),
+            colors={1: jelly_color, 3: muscle_color}
+        )
+        if 'image' in thumb_result:
+            img_data = thumb_result['image'].split(',', 1)[1]
+            thumb_path = CUSTOM_THUMBS / f'{submission_id}.png'
+            with open(thumb_path, 'wb') as f:
+                f.write(base64.b64decode(img_data))
+    except Exception:
+        pass  # Thumbnail failure is non-fatal
+
+    submission = {
+        'id': submission_id,
+        'name': name,
+        'genome': genome,
+        'jelly_color': jelly_color,
+        'muscle_color': muscle_color,
+        'timestamp': timestamp,
+    }
+    if email:
+        submission['email'] = email
+
+    submissions = _load_submissions()
+    submissions.append(submission)
+    _save_submissions(submissions)
+
+    prediction = predict_performance(genome)
+
+    return jsonify({'id': submission_id, 'prediction': prediction})
+
+
+@app.route('/api/custom/aquarium', methods=['GET'])
+def api_custom_aquarium():
+    """Return the last ≤15 submissions for the aquarium display."""
+    submissions = _load_submissions()
+    recent = submissions[-16:][::-1]  # Most recent first, up to 16 (2 cols × 8)
+    public = [
+        {
+            'id': s['id'],
+            'name': s['name'],
+            'jelly_color': s['jelly_color'],
+            'muscle_color': s['muscle_color'],
+            'timestamp': s['timestamp'],
+        }
+        for s in recent
+    ]
+    return jsonify({'submissions': public})
+
+
+@app.route('/api/custom/thumbnail/<submission_id>')
+def api_custom_thumbnail(submission_id):
+    """Serve a submission thumbnail PNG."""
+    # Only allow UUID-format IDs
+    if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', submission_id):
+        return 'Not found', 404
+    thumb_path = CUSTOM_THUMBS / f'{submission_id}.png'
+    if not thumb_path.exists():
+        return 'Not found', 404
+    return send_from_directory(str(CUSTOM_THUMBS), f'{submission_id}.png', mimetype='image/png')
 
 
 if __name__ == '__main__':
