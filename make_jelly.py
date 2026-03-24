@@ -388,18 +388,20 @@ def fill_tank(genome, max_particles, grid_res=128, spawn_offset=None, water_marg
 
 def random_genome():
     """Generate a random but reasonable genome for testing."""
-    # 9 Genes: Shape (6) + Thickness (3)
+    # 11 Genes: Shape (6) + Thickness (3) + Timing (2)
     # Bounds match GENOME_LOWER/GENOME_UPPER in evolve.py
-    genome = np.zeros(9)
-    genome[0] = np.random.uniform(0.0, 0.25)    # cp1_x
+    genome = np.zeros(11)
+    genome[0] = np.random.uniform(0.0,   0.25)  # cp1_x
     genome[1] = np.random.uniform(-0.15, 0.15)  # cp1_y
-    genome[2] = np.random.uniform(0.0, 0.3)     # cp2_x
-    genome[3] = np.random.uniform(-0.2, 0.15)   # cp2_y
-    genome[4] = np.random.uniform(0.05, 0.35)   # end_x
-    genome[5] = np.random.uniform(-0.30, -0.03) # end_y
+    genome[2] = np.random.uniform(0.0,   0.3)   # cp2_x
+    genome[3] = np.random.uniform(-0.2,  0.15)  # cp2_y
+    genome[4] = np.random.uniform(0.05,  0.35)  # end_x
+    genome[5] = np.random.uniform(-0.30, +0.10) # end_y (positive = tips curl upward)
     genome[6] = np.random.uniform(0.025, 0.08)  # t_base
     genome[7] = np.random.uniform(0.025, 0.1)   # t_mid
-    genome[8] = np.random.uniform(0.01, 0.04)   # t_tip
+    genome[8] = np.random.uniform(0.01,  0.04)  # t_tip
+    genome[9] = 0.20                             # act_contraction_frac (start at default)
+    genome[10] = 0.40                            # act_refractory_frac  (start at default)
     return genome
 
 

@@ -103,6 +103,13 @@ fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 # Defaults to actuation_strength; override per-instance for parameter sweeps
 instance_actuation = ti.field(dtype=float, shape=(n_instances,))
 
+# Per-instance pulse timing (genome genes 9, 10)
+# contraction_frac: fraction of period spent contracting  (default 0.20)
+# refractory_frac:  fraction of period in refractory rest (default 0.40)
+# relaxation_frac = 1 - contraction_frac - refractory_frac (clamped >= 0.05 in kernel)
+instance_act_contraction = ti.field(dtype=float, shape=(n_instances,))
+instance_act_refractory  = ti.field(dtype=float, shape=(n_instances,))
+
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
 # Per-instance muscle hue (default offset by 0.15 from jelly hue for contrast)
@@ -116,6 +123,8 @@ for _i in range(n_instances):
     instance_muscle_hue[_i] = (0.55 + 0.15) % 1.0
     instance_actuation[_i] = actuation_strength
     instance_payload_density[_i] = 2.5
+    instance_act_contraction[_i] = ACT_CONTRACTION_END        # 0.20
+    instance_act_refractory[_i]  = 1.0 - ACT_RELAXATION_END  # 0.40
 
 # --- PHYSICS KERNELS ---
 
@@ -126,17 +135,6 @@ def substep():
     current_time = sim_time[None]
     period = 1.0 / actuation_freq
     phase = (current_time % period) / period
-    
-    # Raised cosine waveform: 20% contraction, 80% relaxation (bio-inspired asymmetry)
-    # Waveform: contraction → relaxation → refractory (bell settles before next stroke)
-    activation = 0.0
-    if phase < ACT_CONTRACTION_END:
-        activation = 0.5 * (1.0 - ti.cos(phase / ACT_CONTRACTION_END * 3.14159265))
-    elif phase < ACT_RELAXATION_END:
-        rel_phase = (phase - ACT_CONTRACTION_END) / (ACT_RELAXATION_END - ACT_CONTRACTION_END)
-        activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
-    # else: refractory period — activation stays 0
-
 
     # 1. Reset Grid
     for m, i, j in grid_m:
@@ -146,6 +144,19 @@ def substep():
     # 2. P2G
     for m, p in x:
         if material[m, p] < 0: continue
+
+        # Per-instance raised-cosine activation
+        c_end   = instance_act_contraction[m]
+        ref_frac = instance_act_refractory[m]
+        relax_dur = ti.max(0.05, 1.0 - c_end - ref_frac)
+        relax_end = c_end + relax_dur
+        activation = 0.0
+        if phase < c_end:
+            activation = 0.5 * (1.0 - ti.cos(phase / c_end * 3.14159265))
+        elif phase < relax_end:
+            rel_phase = (phase - c_end) / relax_dur
+            activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
+        # else: refractory — activation stays 0
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
         if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid_y - 2: continue
@@ -315,18 +326,10 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
     """
     'Deep Sea Abyss' Renderer with Grid-Based Light Blue Gradient.
     """
-    # Re-calculate Pulse for visual sync in the renderer
+    # Re-calculate phase for visual sync (activation computed per-instance below)
     period = 1.0 / actuation_freq
     phase = (sim_time[None] % period) / period
-    # Waveform: contraction → relaxation → refractory (bell settles before next stroke)
-    activation = 0.0
-    if phase < ACT_CONTRACTION_END:
-        activation = 0.5 * (1.0 - ti.cos(phase / ACT_CONTRACTION_END * 3.14159265))
-    elif phase < ACT_RELAXATION_END:
-        rel_phase = (phase - ACT_CONTRACTION_END) / (ACT_RELAXATION_END - ACT_CONTRACTION_END)
-        activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
-    # else: refractory period — activation stays 0
-    
+
     grid_norm_factor = float(p_grid_side - 1) if p_grid_side > 1 else 1.0
 
     for m, p in x:
@@ -334,13 +337,25 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         mat = material[m, p]
         if mat < 0 or pos[0] < 0: continue
 
+        # Per-instance activation for muscle colour sync
+        c_end_r    = instance_act_contraction[m]
+        ref_frac_r = instance_act_refractory[m]
+        relax_dur_r = ti.max(0.05, 1.0 - c_end_r - ref_frac_r)
+        relax_end_r = c_end_r + relax_dur_r
+        activation = 0.0
+        if phase < c_end_r:
+            activation = 0.5 * (1.0 - ti.cos(phase / c_end_r * 3.14159265))
+        elif phase < relax_end_r:
+            rp = (phase - c_end_r) / relax_dur_r
+            activation = 0.5 * (1.0 + ti.cos(rp * 3.14159265))
+
         # --- LIGHT CALCULATION ---
         vel = v[m, p].norm()
-        stress = 1.0 - Jp[m, p] 
-        
+        stress = 1.0 - Jp[m, p]
+
         color = ti.Vector([0.0, 0.0, 0.0])
         intensity = 0.0
-        
+
         row_idx, col_idx = m // p_grid_side, m % p_grid_side
         norm_x = float(col_idx) / grid_norm_factor
         norm_y = float(row_idx) / grid_norm_factor

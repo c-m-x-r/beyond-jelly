@@ -42,9 +42,16 @@ START_SIGMA = 0.25
 OUTPUT_DIR = "output"
 
 # Genome bounds: [cp1_x, cp1_y, cp2_x, cp2_y, end_x, end_y, t_base, t_mid, t_tip]
-GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05, -0.30,  0.025,  0.025,  0.01]
-GENOME_UPPER = [0.25,  0.15,  0.3,   0.15, 0.35, -0.03,  0.08,   0.1,    0.04]
+# Genes 0-8: morphology (Bezier shape + thickness)
+# Gene  9:   act_contraction_frac — fraction of period spent contracting  [0.05, 0.40]
+# Gene 10:   act_refractory_frac  — fraction of period in refractory rest [0.20, 0.75]
+#            relaxation_frac = 1 - contraction - refractory (clamped ≥ 0.05 in kernel)
+GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05,  -0.30,  0.025,  0.025,  0.01,  0.05,  0.20]
+GENOME_UPPER = [0.25,  0.15,  0.3,   0.15, 0.35,  +0.10,  0.08,   0.1,    0.04,  0.40,  0.75]
 GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
+# Override timing genes to start at known-good defaults rather than midpoint
+GENOME_X0[9]  = 0.20   # contraction_frac default
+GENOME_X0[10] = 0.40   # refractory_frac default
 
 # Fitness constants
 PENALTY_INVALID = 100.0
@@ -71,7 +78,7 @@ def render_frame(radius, web_palette=False):
         sim.tone_map_and_encode()
 
 
-def compute_fitness(sim_results, muscle_counts):
+def compute_fitness(sim_results, muscle_counts, genomes=None):
     raw = []
     for i in range(POPSIZE):
         init_y = sim_results[i, 0]
@@ -84,7 +91,19 @@ def compute_fitness(sim_results, muscle_counts):
 
         # Cap at ceiling so bouncing doesn't inflate score
         displacement = min(final_y, 0.93) - init_y
-        muscle_cost = (muscle_counts[i] / MUSCLE_REFERENCE) ** 0.5
+
+        # Effective muscle cost: penalise both particle count and active fraction.
+        # active_frac = 1 - refractory_frac (fraction of cycle with muscle firing).
+        # A jellyfish that rests more uses less total muscle energy per cycle.
+        # integral of raised-cosine over one active phase = 0.5 × active_duration,
+        # so effective_cost ∝ muscle_count × (1 - refractory_frac).
+        if genomes is not None and len(genomes[i]) > 10:
+            refractory_frac = float(np.clip(genomes[i][10], 0.20, 0.75))
+        else:
+            refractory_frac = 0.40   # legacy default
+        active_frac = 1.0 - refractory_frac
+        effective_muscle = muscle_counts[i] * active_frac
+        muscle_cost = (effective_muscle / MUSCLE_REFERENCE) ** 0.5
         raw.append(-displacement / muscle_cost)  # CMA-ES minimises
 
     # Set penalty to just worse than the worst valid individual this generation.
@@ -110,6 +129,12 @@ def load_batch(genomes):
         sim.load_particles(i, pos, mat, fiber)
         muscle_counts.append(stats['muscle_count'])
         instance_stats.append(stats)
+
+        # Apply timing genes if present
+        if len(genome) > 9:
+            sim.instance_act_contraction[i] = float(np.clip(genome[9],  0.05, 0.40))
+        if len(genome) > 10:
+            sim.instance_act_refractory[i]  = float(np.clip(genome[10], 0.20, 0.75))
 
     ti.sync()
     return muscle_counts, instance_stats
@@ -396,7 +421,8 @@ def evolve(generations, seed=42):
     csv_file = open(csv_path, 'a', newline='')
     csv_writer = csv.writer(csv_file)
     if not csv_exists:
-        header = ['generation', 'individual'] + [f'gene_{i}' for i in range(9)] + \
+        n_genes = len(GENOME_LOWER)
+        header = ['generation', 'individual'] + [f'gene_{i}' for i in range(n_genes)] + \
                  ['fitness', 'final_y', 'displacement', 'drift', 'muscle_count', 'valid', 'sigma', 'efficiency']
         csv_writer.writerow(header)
         csv_file.flush()
@@ -434,7 +460,7 @@ def evolve(generations, seed=42):
                 n_self_intersect += 1
 
         # 4. Compute fitness
-        fitness_values = compute_fitness(sim_results, muscle_counts)
+        fitness_values = compute_fitness(sim_results, muscle_counts, genomes)
 
         # 5. Update CMA-ES
         es.tell(genomes, fitness_values)
