@@ -23,7 +23,7 @@ Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES an
 Three main components, fully integrated:
 
 1. **mpm_sim.py** - GPU-accelerated MPM simulation engine
-   - 16 parallel instances on CUDA
+   - 16 simulation instances batched on one GPU
    - Materials: Water(0), Jelly(1), Payload(2), Muscle(3)
    - Fixed tensor allocation (16 x 80,000 particles)
    - Raised cosine actuation waveform (20% contraction, 80% relaxation)
@@ -172,8 +172,8 @@ All outputs in `output/` directory:
 
 ## Performance
 
-Benchmarked on CUDA (quality=1, 128x128 grid, 80K particles, 16 instances):
-- Substep throughput: ~1.2 ms/step (all 16 instances in parallel)
+Benchmarked on a single CUDA GPU (quality=1, 128x128 grid, 80K particles, 16 instances batched):
+- Substep throughput: ~1.2 ms/step (all 16 instances in one batch)
 - Per-generation: ~72s simulation + ~2s CPU phenotype generation
 - 50-generation run: ~62 minutes total
 - CPU-GPU transfer: only 16x5 floats per generation (fitness results)
