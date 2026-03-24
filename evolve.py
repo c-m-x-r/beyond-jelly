@@ -24,11 +24,18 @@ import csv
 import json
 import pickle
 
-# Pre-parse --instances so env var is set before mpm_sim import (Taichi allocates on import)
+# Pre-parse --instances and --tall so env vars are set before mpm_sim import (Taichi allocates on import)
 _pre = argparse.ArgumentParser(add_help=False)
 _pre.add_argument('--instances', type=int, default=16)
+_pre.add_argument('--tall', action='store_true')
 _pre_args, _ = _pre.parse_known_args()
 os.environ['JELLY_INSTANCES'] = str(_pre_args.instances)
+if _pre_args.tall:
+    os.environ.setdefault('JELLY_GRID_Y',    '256')
+    os.environ.setdefault('JELLY_PARTICLES', '160000')
+    os.environ.setdefault('JELLY_DOMAIN_H',  '2.0')
+
+_TALL = _pre_args.tall
 
 import taichi as ti
 import mpm_sim as sim
@@ -89,8 +96,8 @@ def compute_fitness(sim_results, muscle_counts, genomes=None):
             raw.append(None)
             continue
 
-        # Cap at ceiling so bouncing doesn't inflate score
-        displacement = min(final_y, 0.93) - init_y
+        # Cap near ceiling so bouncing doesn't inflate score
+        displacement = min(final_y, sim.domain_height - 0.07) - init_y
 
         # Effective muscle cost: penalise both particle count and active fraction.
         # active_frac = 1 - refractory_frac (fraction of cycle with muscle firing).
@@ -123,8 +130,10 @@ def load_batch(genomes):
     instance_stats = []
 
     for i, genome in enumerate(genomes):
+        spawn = np.array([0.5, 0.60]) if _TALL else None  # tall: tips clear damping zone (y>0.30)
         pos, mat, fiber, stats = fill_tank(
-            genome, sim.n_particles, grid_res=int(sim.n_grid)
+            genome, sim.n_particles, grid_res=int(sim.n_grid),
+            domain_height=sim.domain_height, spawn_offset=spawn
         )
         sim.load_particles(i, pos, mat, fiber)
         muscle_counts.append(stats['muscle_count'])
