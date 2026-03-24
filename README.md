@@ -6,282 +6,229 @@ GPU-accelerated evolutionary optimization of soft robotic jellyfish morphologies
 
 ## Overview
 
-This project explores whether strict biomimetic copying of natural jellyfish shapes is suboptimal for soft robots carrying instrumented payloads. By leveraging evolutionary computation (CMA-ES) within a GPU-accelerated Taichi simulation, we aim to discover novel bell morphologies specifically optimized for payload-carrying applications.
+This project explores whether strict biomimetic copying of natural jellyfish shapes is suboptimal for soft robots carrying instrumented payloads. By leveraging evolutionary computation (CMA-ES) within a GPU-accelerated Taichi simulation, we discover novel bell morphologies specifically optimized for payload-carrying applications — unconstrained by biological symmetry or manufacturing conventions.
 
 <img width="1139" height="1281" alt="Screenshot 2026-02-24 220202" src="https://github.com/user-attachments/assets/24f17ad6-8eb4-4262-beb1-c4bec5769942" />
 
 ### Hypothesis
 
-Evolutionary strategies applied within GPU-accelerated simulation will converge upon novel bell morphologies that:
-- Differ significantly from biological baselines when subjected to centralized payloads
-- Exhibit higher propulsive efficiency compared to standard biomimetic designs
-- Demonstrate improved station-keeping stability
+Evolutionary strategies applied within GPU-accelerated simulation will converge upon novel bell morphologies that differ significantly from biological baselines, exhibiting higher propulsive efficiency when carrying centralized payloads.
+
+**Experiment 1 finding:** All independent runs converged within 10 generations to a wide, flat-tipped bell with outward-curling tips — pressing against the gene bound that prevented positive end_y. This morphology is not achievable in real *Aurelia aurita* (radial symmetry prevents outward bell tips). The point is to escape biomimicry.
+
+**Experiment 2 (current):** Relaxed end_y to allow cup-shaped bells; added evolved actuation timing (11D genome, λ=32 population).
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      CMA-ES Optimizer                       │
-│               (evolve.py, popsize=16, 9 genes)              │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ Genome Vector (9 floats)
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  Genotype-Phenotype Mapping                  │
-│                     (make_jelly.py)                          │
-│  • Bezier curve bell shape (6 params)                       │
-│  • Variable thickness profile (3 params)                    │
-│  • Muscle layer, mesoglea collar, transverse bridge         │
-│  • Radial symmetry mirroring                                │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ Particle positions + materials
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Tank Assembly Stage                       │
-│                  (fill_tank in make_jelly.py)                │
-│  • Background water generation (lattice grid)               │
-│  • KDTree boolean subtraction (carve robot from fluid)      │
-│  • Padding to fixed 80K particle count                      │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ Fixed-size particle arrays (CPU → GPU)
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                  MPM Simulation Engine                       │
-│                     (mpm_sim.py)                             │
-│  • 16 simulation instances batched on one GPU               │
-│  • 128×128 grid, 80K particles per instance                 │
-│  • Materials: Water(0), Jelly(1), Payload(2), Muscle(3)     │
-│  • Pulsed active stress actuation on muscle tissue          │
-│  • GPU-side payload CoM tracking (fitness_buffer)           │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ Payload displacement + stability (16 floats)
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Fitness Evaluation                        │
-│  • Efficiency: displacement / sqrt(muscle_count / 500)      │
-│  • Muscle floor (≥200 particles) rejects degenerate shapes  │
-│  • Dynamic invalid penalty: worst_valid_fitness + 1         │
-│  • Boundary-stuck detection (y > 0.93 or y < 0.01)         │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      CMA-ES Optimizer                        │
+│           (evolve.py, popsize=JELLY_INSTANCES, 11 genes)     │
+└──────────────────────┬───────────────────────────────────────┘
+                       │ Genome Vector (11 floats)
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│                 Genotype-Phenotype Mapping                    │
+│                      (make_jelly.py)                         │
+│  • Bezier curve bell shape (6 params)                        │
+│  • Variable thickness profile (3 params)                     │
+│  • Actuation timing: contraction_frac, refractory_frac (2)  │
+│  • Muscle layer, mesoglea collar, transverse bridge          │
+└──────────────────────┬───────────────────────────────────────┘
+                       │ Particle positions + materials + timing
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│                   MPM Simulation Engine                       │
+│                      (mpm_sim.py)                            │
+│  • N instances batched on one GPU (JELLY_INSTANCES)         │
+│  • 128×128 grid, 80K particles per instance                  │
+│  • Per-instance raised-cosine actuation waveform             │
+│  • All four boundaries damped (n_grid/20 layer)             │
+│  • GPU-side payload CoM tracking + fitness buffer            │
+└──────────────────────┬───────────────────────────────────────┘
+                       │ Payload displacement (N floats)
+                       ▼
+┌──────────────────────────────────────────────────────────────┐
+│                    Fitness Evaluation                         │
+│  • displacement / sqrt(muscle_count × (1−refractory) / 500) │
+│  • Activity-weighted: resting more = lower effective cost    │
+│  • Ceiling cap at y=0.93 (not invalidated, just capped)     │
+│  • Invalid penalty: worst_valid + 1.0 (not hard -100)       │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ## Project Structure
 
 ```
 jellyfih/
-├── mpm_sim.py          # GPU MPM engine + renderer + fitness kernels
-├── make_jelly.py       # Genotype-phenotype mapping + tank filler
-├── evolve.py           # CMA-ES evolutionary loop + visualization
-├── run_population.py   # Batch population runner with CV2 rendering
-├── tune_actuation.py   # Per-instance actuation strength sweep tool
-├── helpers/            # Utility scripts (not required for core evolution)
-│   ├── fluid_test.py       # Fluid dynamics test visualization
-│   ├── make_cad.py         # CAD export: genome → STL (extruded + revolved)
-│   ├── make_comparison.py  # Side-by-side comparison video generator
-│   └── payload_sink.py     # Baseline: payload sinking without jellyfish
-├── web/                # Flask web viewer + interactive designer
-│   ├── app.py
-│   ├── templates/
-│   └── static/
-├── pyproject.toml      # Project dependencies
-├── CLAUDE.md           # AI assistant project instructions
-├── README.md           # This file
-└── output/             # Evolution results (generated)
-    ├── evolution_log.csv
-    ├── best_genomes.json
-    ├── checkpoint.pkl
-    └── view_*.mp4
+├── mpm_sim.py              # GPU MPM engine + renderer + fitness kernels
+├── make_jelly.py           # Genotype-phenotype mapping + tank filler
+├── evolve.py               # CMA-ES evolutionary loop + visualization
+├── helpers/
+│   ├── view_single.py      # Full-res single-genome render + vorticity overlay
+│   ├── view_generation.py  # All individuals from one generation as grid
+│   ├── view_random.py      # N independently random jellyfish
+│   ├── fluid_analysis.py   # Grid momentum/vorticity time-series analysis
+│   ├── payload_sink.py     # Payload-only baseline (no jellyfish)
+│   ├── fluid_test.py       # Oscillating paddle fluid test
+│   ├── make_cad.py         # Genome → STL (extruded + revolved)
+│   ├── make_comparison.py  # Side-by-side comparison video
+│   └── tune_actuation.py   # Actuation strength sweep
+├── web/                    # Flask web viewer + interactive designer
+├── setup_cloud.sh          # Cloud instance bootstrap
+├── deploy.sh               # Full rsync + setup + launch pipeline
+├── sync_results.sh         # Pull results from remote instance
+├── run_experiments.sh      # Multi-seed experiment runner
+├── storage/
+│   └── EXPERIMENT_LOG.md   # Full experiment history + methodology
+├── pyproject.toml
+└── output/                 # Evolution results (generated, gitignored)
 ```
 
 ## Installation
-
-### Install uv
-
-```bash
-# Linux / macOS
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Windows
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Or via pip
-pip install uv
-```
-
-### Set up the project
-
-Dependencies are split by use case. Choose the sync command that matches your needs:
 
 ```bash
 git clone <repo-url>
 cd jellyfih
 
-# Web viewer, CAD export, comparison videos, morphology plots
-# (no GPU required)
+# Web viewer, CAD, videos (no GPU required)
 uv sync
 
 # Full simulation + evolution (requires CUDA GPU)
 uv sync --extra simulation
 ```
 
-| Extra | Adds | Use when |
-|-------|------|----------|
-| *(none)* | numpy, scipy, flask, moviepy, trimesh, shapely, matplotlib, imageio | Web viewer, CAD, videos |
-| `simulation` | taichi, cma, opencv-python | Running evolution or simulation |
-
-### Requirements
-- Python 3.10+
-- CUDA-capable GPU (simulation only)
+Requirements: Python 3.10+, CUDA GPU (for simulation), `libx11-6 libxext6 libxi6` (headless Linux).
 
 ## Usage
 
 ```bash
-# Quick 5-generation test run (~6 min)
-uv run python evolve.py --gens 5
-
-# Full 50-generation evolution (~60 min)
-uv run python evolve.py
+# Evolve — lambda set by JELLY_INSTANCES (default 16, use 32 for Exp 2)
+JELLY_INSTANCES=32 uv run python evolve.py --gens 50 --seed 42 --run-id myrun
 
 # Resume from checkpoint (automatic)
-uv run python evolve.py --gens 50
+JELLY_INSTANCES=32 uv run python evolve.py --gens 50 --run-id myrun
 
-# Render best genomes as 4x4 grid video
-# Rows = generations, columns = lime|green|turquoise|cyan
-uv run python evolve.py --view
+# Render single genome, full-res, many cycles
+JELLY_INSTANCES=1 uv run python helpers/view_single.py --aurelia --steps 300000
+JELLY_INSTANCES=1 uv run python helpers/view_single.py --genome "[0.15,-0.06,...]" --flow
 
-# Render a specific generation
-uv run python evolve.py --view --gen 3
+# View all individuals from a generation
+JELLY_INSTANCES=16 uv run python helpers/view_generation.py \
+    --gen 5 --log output/myrun/evolution_log_myrun.csv --palette random
 
-# Test morphology generator standalone
-uv run python make_jelly.py
+# 16 random jellyfish with vorticity overlay
+JELLY_INSTANCES=16 uv run python helpers/view_random.py --flow --steps 100000
 
-# Payload sink baseline (no jellyfish)
-uv run python helpers/payload_sink.py
+# Fluid dynamics analysis (grid momentum + vorticity → CSV)
+JELLY_INSTANCES=1 uv run python helpers/fluid_analysis.py \
+    --genome "[0.15,-0.06,0.167,-0.12,0.289,-0.041,0.056,0.046,0.014,0.2,0.4]"
 
-# Fluid dynamics test visualization
-uv run python helpers/fluid_test.py
+# Aurelia reference baseline
+uv run python evolve.py --aurelia
 
-# CAD export to STL
-uv run python helpers/make_cad.py --aurelia
-uv run python helpers/make_cad.py --gen 5 --diameter 120
-uv run python helpers/make_cad.py --gen 5 --diameter 120 --remesh 5  # isotropic remesh
-
-# Side-by-side comparison video
-uv run python helpers/make_comparison.py
-
-# Web viewer (genome explorer + evolutionary history + interactive designer)
+# Web viewer
 cd web && python app.py   # http://localhost:5000
-# /          — genome sliders, morphology preview, evolution history, convergence plots
-# /custom    — interactive jellyfish designer (symposium mode, shared aquarium)
-
-# Actuation strength sweep (renders N strengths simultaneously across GPU instances)
-uv run python tune_actuation.py
 ```
-
-## Configuration
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Actuation | Raised cosine pulse, strength=500 | 20% contraction / 40% relaxation / 40% refractory; tangent-aligned stress on muscle fiber |
-| Fitness | Efficiency metric | `displacement / sqrt(muscle_count / 500)` — penalises large muscle mass relative to thrust |
-| Resolution | 128×128 grid | 80K particles, quality=1 |
-| Payload | 0.08 × 0.05 | Material 2, 2.5× density, 0.44× gravity (slightly neg. buoyant) |
-| Boundaries | Damped sides, clamped walls | Damping layer = grid/20 |
-| CMA-ES | lambda=16, sigma=0.1 | Population matches GPU batch size (λ=48 used on cloud runs) |
-| Sim Duration | 3 cycles (60K steps) | dt=2e-5, freq=1Hz |
-| Spawn | [0.5, 0.4] | Centered, 40% up — gives 0.53 headroom before ceiling threshold |
 
 ## Genome Encoding
 
-9-dimensional vector controlling bell morphology via cubic Bezier curves:
+11-dimensional vector. Genes 0–8 are morphology; genes 9–10 are actuation timing.
 
-| Index | Parameter | Description |
-|-------|-----------|-------------|
-| 0-1 | cp1_x, cp1_y | Control Point 1 (curve shaping) |
-| 2-3 | cp2_x, cp2_y | Control Point 2 (curve shaping) |
-| 4-5 | end_x, end_y | Tip position (bell extent) |
-| 6 | t_base | Thickness at payload connection |
-| 7 | t_mid | Thickness at bell middle |
-| 8 | t_tip | Thickness at bell tip |
+| Index | Parameter | Bounds | Description |
+|-------|-----------|--------|-------------|
+| 0 | cp1_x | [0.0, 0.25] | Bezier Control Point 1 x |
+| 1 | cp1_y | [-0.15, 0.15] | Bezier Control Point 1 y |
+| 2 | cp2_x | [0.0, 0.3] | Bezier Control Point 2 x |
+| 3 | cp2_y | [-0.2, 0.15] | Bezier Control Point 2 y |
+| 4 | end_x | [0.05, 0.35] | Bell tip x-extent |
+| 5 | end_y | [-0.30, **+0.10**] | Bell tip y-extent (positive = tips curl upward) |
+| 6 | t_base | [0.025, 0.08] | Thickness at payload connection |
+| 7 | t_mid | [0.025, 0.1] | Thickness at bell middle |
+| 8 | t_tip | [0.01, 0.04] | Thickness at bell tip |
+| 9 | act_contraction_frac | [0.05, 0.40] | Fraction of cycle contracting (init: 0.20) |
+| 10 | act_refractory_frac | [0.20, 0.75] | Fraction of cycle resting (init: 0.40) |
 
-## Materials
+`relaxation_frac = max(0.05, 1 − contraction − refractory)` — implicit, clamped in kernel.
 
-| ID | Material | Properties |
-|----|----------|------------|
-| 0 | Water | Fluid, zero shear modulus |
-| 1 | Jelly | Hyperelastic soft body (mesoglea) |
-| 2 | Payload | Near-rigid, high density (2.5x) |
-| 3 | Muscle | Soft body + pulsed active stress |
-| -1 | Dead | Padding particles (skipped in kernels) |
+## Physics Model
 
-## Outputs
-
-| File | Description |
-|------|-------------|
-| `evolution_log.csv` | All genomes with fitness, efficiency, displacement, drift, muscle count, validity per generation |
-| `best_genomes.json` | Best genome per generation for replay |
-| `checkpoint.pkl` | CMA-ES state for crash recovery |
-| `view_*.mp4` | Rendered 4x4 grid videos (column-color-coded) |
-| `custom_submissions/` | Genomes + thumbnail PNGs submitted via the `/custom` web designer |
+| Aspect | Model | Notes |
+|--------|-------|-------|
+| Fluid | Weakly-compressible MPM, mu=0 | Inviscid; infinite Reynolds number |
+| Speed of sound | ~200 m/s (sim) vs 1480 m/s (real) | 7× slower — deliberate CFL trade-off |
+| Buoyancy | None | Payload gets full gravity; water pressure provides partial support only |
+| Payload | E=2e5, 2.5× density, plasticity ±0.5% | Near-rigid; sinks ~0.09 units/3 cycles without jellyfish |
+| Boundaries | All four walls: 5% damping per cell in n_grid/20 band | Absorbs wall reflections; no free surface |
+| Actuation | Raised cosine pulse, per-instance timing | Tangent-aligned stress on muscle fiber direction |
 
 ## Performance
 
-Benchmarked on a single CUDA GPU (RTX 4090, 16 simulation instances batched, 80K particles each):
+| Hardware | λ | Steps/eval | Time/gen | Cost for 4 seeds × 50 gens |
+|----------|---|------------|----------|-----------------------------|
+| RTX 4090 | 16 | 150K | ~112s | ~3.1 hrs sequential, ~$0.93 |
+| 4× RTX 3080 | 32 each | 150K | ~212s | ~3 hrs parallel, ~$0.85 |
 
-| Metric | Value |
-|--------|-------|
-| Substep throughput | ~1.2 ms/step |
-| Per-generation time (λ=16) | ~74s (72s sim + 2s CPU) |
-| 50-generation run (λ=16) | ~62 minutes |
-| Per-generation time (λ=48, cloud) | ~244s |
-| GPU-CPU transfer | λ×5 floats/generation |
+GPU is SM-compute bound at λ=16–32 (~6% VRAM). Use `CUDA_VISIBLE_DEVICES=N` to pin one process per GPU on multi-GPU machines.
 
-The GPU is SM-compute bound at λ=16 (100% SM utilisation, ~6% VRAM). Running two `evolve.py` processes time-slices rather than parallelises — scale via larger λ in a single process instead.
+## Cloud Deployment
+
+```bash
+# 1. Provision instance on vast.ai (RTX 4090 or 4× RTX 3080)
+vastai create instance <offer_id> --image pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime \
+    --disk 30 --ssh --direct --label jellyfih
+
+# 2. Deploy (rsync code + install deps + launch experiments)
+bash deploy.sh <ssh_addr> <ssh_port>
+
+# 3. Monitor
+ssh -p <port> root@<addr> tail -f /root/jellyfih/logs/run_experiments.log
+
+# 4. Sync results
+bash sync_results.sh <ssh_addr> <port> <label>
+
+# 5. Destroy
+vastai destroy instance <ID>
+```
+
+Multi-GPU parallel (4× 3080, one seed per GPU):
+```bash
+for i in 0 1 2 3; do
+    SEED=$((42 + i * 95))
+    PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=$i JELLY_INSTANCES=32 \
+        uv run python evolve.py --gens 50 --seed $SEED --run-id exp2_s$SEED \
+        > logs/s$SEED.log 2>&1 &
+done
+```
 
 ## Current Status
 
 ### Implemented
-- [x] MPM simulation engine with 16 simulation instances batched on one GPU
-- [x] Bezier-curve morphology generator with tangent-aligned muscle fibers
-- [x] Tank filler with KDTree boolean subtraction
-- [x] Pulsed active stress actuation — 20/40/40 waveform with refractory period
-- [x] Efficiency-based fitness with muscle floor and dynamic invalid penalty
-- [x] GPU-side payload CoM fitness evaluation
-- [x] CMA-ES evolutionary loop with bounds handling
-- [x] Checkpoint/resume for crash recovery
-- [x] Full CSV + JSON logging (fitness, efficiency, displacement, covariance diagnostics)
-- [x] HDR particle splatting renderer
-- [x] 4x4 grid visualization with per-column color coding
-- [x] Zero-actuation baseline validation
-- [x] Boundary-stuck payload detection
-- [x] Per-instance actuation field (enables parameter sweeps across GPU batch)
-- [x] Web viewer: genome sliders, evolution history, convergence plots, click-drag Bezier points
-- [x] `/custom` interactive designer: 3-step wizard, colour picker, shared aquarium, fitness prediction
-- [x] Vast.ai cloud deployment (`setup_vastai.sh`, λ=48 cloud runs validated)
+- [x] MPM simulation engine, N-instance GPU batch, 11D genome
+- [x] Per-instance actuation timing (genes 9–10, evolved)
+- [x] Activity-weighted fitness: `displacement / sqrt(muscle × (1−refractory) / 500)`
+- [x] Bezier-curve morphology + cup-bell support (end_y up to +0.10)
+- [x] All four boundaries damped
+- [x] CMA-ES with checkpoint/resume, full CSV/JSON/diagnostics logging
+- [x] HDR abyss renderer + web palette + vorticity overlay
+- [x] view_single / view_generation / view_random / fluid_analysis helpers
+- [x] Cloud deployment scripts (deploy.sh, sync_results.sh, setup_cloud.sh)
+- [x] Multi-GPU parallel runs via CUDA_VISIBLE_DEVICES
+- [x] Fluid dynamics analysis tool (grid momentum, vorticity, wall flux)
+- [x] Web viewer: genome sliders, evolution history, Bezier editor, /custom designer
 
-### TODO
-- [ ] Full Cost of Transport fitness (GPU energy tracking)
-- [ ] Re-enable drift penalty in fitness function
-- [ ] Adaptive resolution (128 → 256 grid transition)
-- [ ] Genome heatmap visualization
-- [ ] Automatic per-generation video export
+### Known Limitations
+- No buoyancy model (intentional simplification)
+- 2D only — overestimates thrust vs 3D jellyfish
+- Speed of sound 7× slower than real water
+- Drift penalty disabled (lateral stability not penalized)
+- Ceiling exploit: population saturates at y≈0.88 within ~10 gens
 
-## Cloud Deployment (Vast.ai)
-
-The project supports running long evolution jobs on rented GPU instances via [Vast.ai](https://vast.ai).
-
-```bash
-# On a fresh Vast.ai CUDA instance (RTX 4090 recommended):
-bash setup_vastai.sh   # installs uv, deps, verifies Taichi CUDA, starts tmux session
-
-# Run with larger population for better GPU utilisation
-uv run python evolve.py --gens 50   # λ=48 recommended for cloud runs
-
-# Sync results back to local machine
-rsync -az -e "ssh -p <port>" root@<host>:~/jellys/output/ ./output/
-```
-
-Key finding from cloud runs: the GPU is SM-compute bound, not memory bound (~6% VRAM at λ=16). Running two `evolve.py` processes does not parallelise — it time-slices. Scale by increasing λ in a single process.
+### Next (Experiment 3 candidates)
+- Frequency as an evolved gene [0.3, 3.0 Hz]
+- Multi-objective: Pareto front over (displacement, effective_muscle)
+- Longer evaluation (6+ cycles) to measure sustained propulsion
+- Physical validation: 120mm diameter bell, ~30g payload
 
 ## References
 

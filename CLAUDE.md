@@ -2,174 +2,183 @@
 
 ## Project Overview
 
-Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES and 2D MPM simulation in Taichi. The goal is to discover bell shapes optimized for carrying instrumented payloads, potentially diverging from natural biomimetic designs.
+Evolutionary optimization of soft robotic jellyfish morphologies using CMA-ES and 2D MPM simulation in Taichi. The goal is to discover bell shapes optimized for carrying instrumented payloads, diverging from biomimetic designs where necessary.
+
+**Current experiment:** Experiment 2 — 11D genome with evolved actuation timing and relaxed bell geometry. See `storage/EXPERIMENT_LOG.md` for full history.
 
 ## Current Configuration
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Actuation | Raised cosine pulse | 20% contraction / 40% relaxation / 40% refractory, tangent-aligned (Mat 3), strength=500 |
-| Fitness | Efficiency metric | displacement / sqrt(muscle_count / 500); muscle floor ≥200; dynamic invalid penalty |
-| Resolution | 128x128 grid, 80K particles | quality=1, single phase for now |
-| Payload | 0.08 x 0.05 normalized units | Material 2, density via `instance_payload_density` (default 2.5×), full gravity |
-| Boundaries | Damped sides, clamped top/bottom | n_grid/20 damping layer width |
-| CMA-ES | lambda=16, sigma=0.1, 50 gens | Population matches GPU batch size |
-| Sim Duration | 3 actuation cycles (60K steps) | Per fitness evaluation |
-| Frequency | 1.0 Hz | Biological mid-range |
-| Spawn | [0.5, 0.55] | Vertically centred; deepest bell tip (end_y=-0.45) reaches y≈0.10, safely above floor |
+| Genome | 11D | Bezier shape (6) + thickness (3) + actuation timing (2) |
+| Fitness | Activity-weighted efficiency | `displacement / sqrt(muscle_count × (1−refractory_frac) / 500)` |
+| Resolution | 128×128 grid, 80K particles | quality=1 |
+| Payload | 0.08 × 0.05 normalized units | Material 2, density=2.5× water, full gravity |
+| Boundaries | **All four sides damped** | n_grid/20 damping layer; floor and ceiling both absorbed |
+| CMA-ES | lambda=JELLY_INSTANCES, sigma=0.25, 50 gens | Set JELLY_INSTANCES=32 for Exp 2 |
+| Sim Duration | 150,000 steps (7.5 cycles @ 1 Hz) | dt=2e-5 |
+| Frequency | 1.0 Hz | Fixed |
+| Spawn | [0.5, 0.40] | Payload CoM starts below midline; 0.53 units headroom to ceiling |
+| Ceiling cap | y = 0.93 | Displacement capped, not invalidated — ceiling-riders score same as y=0.93 |
+| Actuation strength | 500 | Per-instance field; timing now also per-instance from genome |
 
 ## Architecture
 
 Three main components, fully integrated:
 
 1. **mpm_sim.py** - GPU-accelerated MPM simulation engine
-   - 16 simulation instances batched on one GPU
+   - N simulation instances batched on one GPU (N = `JELLY_INSTANCES` env var, default 16)
    - Materials: Water(0), Jelly(1), Payload(2), Muscle(3)
-   - Fixed tensor allocation (16 x 80,000 particles)
-   - Raised cosine actuation waveform (20% contraction / 40% relaxation / 40% refractory), tangent-aligned stress
-   - Per-instance actuation field (`instance_actuation`) enables parameter sweeps across batch
+   - Fixed tensor allocation (N × 80,000 particles)
+   - Raised cosine actuation waveform — **per-instance timing** via `instance_act_contraction` and `instance_act_refractory` fields (genes 9–10)
+   - Per-instance actuation strength (`instance_actuation`), hue, muscle hue, payload density
    - GPU-side fitness evaluation via `fitness_buffer` field
    - Headless batch runner (`run_batch_headless`)
-   - HDR particle splatting renderer with per-instance color tinting
+   - HDR particle splatting renderer (abyss/web/random palettes) with per-instance color tinting
+   - Vorticity overlay (`render_vorticity_overlay`) — additive curl visualization
+   - Enhanced water rendering: velocity-direction HSV colouring above threshold 0.02
 
 2. **make_jelly.py** - Genotype-phenotype mapping
-   - 9-gene Bezier curve encoding for bell shape
+   - 11-gene encoding: Bezier curve bell shape + thickness + actuation timing
    - Structural features: bell, muscle layer, mesoglea collar, transverse bridge
-   - `fill_tank()`: water generation, KDTree boolean subtraction, dead-particle padding
+   - `fill_tank()` / `generate_phenotype()`: accept `with_payload` param
+   - Water generation, KDTree boolean subtraction, dead-particle padding
    - Returns muscle particle count for CPU-side stats
-   - Includes `AURELIA_GENOME`: hand-designed moon jelly reference
+   - Includes `AURELIA_GENOME`: hand-designed moon jelly reference (9D, compatible)
+   - `random_genome()`: 11D, timing genes init at known-good defaults (0.20/0.40)
 
 3. **evolve.py** - Evolutionary optimizer (CMA-ES)
-   - `--gens N`: set generation count
-   - `--view`: render best genomes as 4x4 grid video
-   - `--view --gen N`: render specific generation
-   - `--aurelia`: evaluate moon jelly reference genome + render video
-   - Zero-actuation baseline check at startup
+   - `--gens N`: generation count
+   - `--seed N`: CMA-ES random seed (use different seeds for independent replicate runs)
+   - `--run-id LABEL`: output subdirectory label (auto-creates `output/<LABEL>/`)
+   - `--view` / `--view --gen N`: render best genomes as grid video
+   - `--aurelia`: evaluate moon jelly reference genome
+   - Zero-actuation + payload-sink baselines at startup (fresh runs only)
    - Checkpoint/resume via pickle (every 5 gens)
-   - Full CSV logging + JSON best-genome history
+   - Full CSV logging (11 genes) + JSON best-genome history + covariance diagnostics
 
 ## Fitness Evaluation
 
-**Efficiency metric**: Rewards thrust relative to muscle mass:
+**Activity-weighted efficiency** (Experiment 2):
 ```
-displacement = final_y - init_y
-fitness = displacement / sqrt(muscle_count / 500)
+active_frac = 1.0 - refractory_frac          # genome gene 10
+effective_muscle = muscle_count × active_frac
+fitness = displacement / sqrt(effective_muscle / 500)
 ```
 
-This penalises bloated muscle mass — a shape that moves twice as far with the same muscle scores identically to one that uses half the muscle for the same displacement. The 500 normalisation factor keeps the metric near unity for typical genomes.
+Rationale: a jellyfish with 70% refractory fires muscles only 30% of the time — it should pay only 30% of the muscle-count cost. This rewards jet-mode propulsion (short strong stroke, long coast) alongside morphological efficiency.
 
-**Validity checks** (instance marked invalid, assigned `worst_valid_fitness + 1`):
-- Payload CoM at y < 0.01 (floor contact) — GPU side
-- muscle_count < 200 (degenerate/empty morphology) — CPU side
+**Displacement cap:**
+```
+displacement = min(final_y, 0.93) - init_y
+```
+Ceiling-riders are not invalidated — their displacement is capped. Once the population saturates against the ceiling, evolution pivots to reducing effective muscle cost.
+
+**Validity checks** (get `worst_valid_fitness + 1.0` penalty):
+- Payload CoM `y < 0.01` (floor contact) — GPU side
+- `muscle_count < 200` (degenerate morphology) — CPU side
 - Self-intersecting morphology — CPU side
 
-**Ceiling cap** (not invalid, just capped):
-- `displacement = min(final_y, 0.93) - init_y` — ceiling-riders score the same as y=0.93; once the population saturates against the ceiling evolution pivots to muscle efficiency
-
-Drift penalty (`- 1.0 * drift`) is implemented but currently commented out in `evolve.py`.
-
-GPU-side: `compute_payload_stats()` kernel averages all Material 2 particle positions via `ti.atomic_add`. Two separate kernels (clear + compute) to avoid Taichi race conditions.
+Drift penalty (`- 1.0 * drift`) is implemented but commented out.
 
 ## Material System
 
 | ID | Material | Properties | Role |
 |----|----------|------------|------|
-| 0 | Water | Fluid, mu=0, lambda=100000 | Background medium |
+| 0 | Water | Fluid, mu=0, lambda=100000, **inviscid** | Background medium |
 | 1 | Jelly | Hyperelastic, E=0.7e3, nu=0.3 | Passive bell structure |
-| 2 | Payload | Near-rigid, E=2e5, density=`instance_payload_density` (default 2.5×), full gravity | Instrumented cargo; density is per-instance configurable (2.5 ≈ LiPo/PCB) |
-| 3 | Muscle | Same elasticity as jelly + active stress | Actuation tissue |
+| 2 | Payload | Near-rigid, E=2e5, nu=0.2, density=2.5×, **full gravity** | Instrumented cargo |
+| 3 | Muscle | Same elasticity as jelly + per-instance active stress | Actuation tissue |
 | -1 | Dead | Skipped in all kernels | Padding to fixed count |
+
+**Physics notes:** No buoyancy model — water pressure provides partial support but is not calibrated to Archimedes' principle. Payload sinks ~0.09 units/3-cycle run without jellyfish. Water speed of sound ~200 m/s (7× slower than real water — deliberate trade-off for CFL stability). Effectively infinite Reynolds number (mu=0).
 
 ## Genome Encoding
 
-9-dimensional vector controlling bell morphology:
+11-dimensional vector. Genes 0–8 are morphology; genes 9–10 are actuation timing.
 
-| Index | Parameter | Bounds | Description |
-|-------|-----------|--------|-------------|
-| 0 | cp1_x | [0.0, 0.25] | Control Point 1 x-offset |
-| 1 | cp1_y | [-0.15, 0.15] | Control Point 1 y-offset |
-| 2 | cp2_x | [0.0, 0.3] | Control Point 2 x-offset |
-| 3 | cp2_y | [-0.2, 0.15] | Control Point 2 y-offset |
-| 4 | end_x | [0.05, 0.35] | Bell tip x-extent |
-| 5 | end_y | [-0.45, -0.03] | Bell tip y-extent |
-| 6 | t_base | [0.025, 0.08] | Thickness at payload |
-| 7 | t_mid | [0.025, 0.1] | Thickness at bell middle |
-| 8 | t_tip | [0.01, 0.04] | Thickness at bell tip |
+| Index | Parameter | Bounds | Init | Description |
+|-------|-----------|--------|------|-------------|
+| 0 | cp1_x | [0.0, 0.25] | mid | Control Point 1 x-offset |
+| 1 | cp1_y | [-0.15, 0.15] | mid | Control Point 1 y-offset |
+| 2 | cp2_x | [0.0, 0.3] | mid | Control Point 2 x-offset |
+| 3 | cp2_y | [-0.2, 0.15] | mid | Control Point 2 y-offset |
+| 4 | end_x | [0.05, 0.35] | mid | Bell tip x-extent |
+| 5 | end_y | [-0.30, **+0.10**] | mid | Bell tip y-extent (**positive = tips curl upward**) |
+| 6 | t_base | [0.025, 0.08] | mid | Thickness at payload connection |
+| 7 | t_mid | [0.025, 0.1] | mid | Thickness at bell middle |
+| 8 | t_tip | [0.01, 0.04] | mid | Thickness at bell tip |
+| 9 | act_contraction_frac | [0.05, 0.40] | **0.20** | Fraction of cycle spent contracting |
+| 10 | act_refractory_frac | [0.20, 0.75] | **0.40** | Fraction of cycle in refractory rest |
 
-CMA-ES uses built-in bounds handling (not hard clipping) to preserve covariance estimation.
+`relaxation_frac = max(0.05, 1.0 − contraction_frac − refractory_frac)` — computed in kernel, not stored.
 
-## Code Conventions
+Timing genes start at historical defaults (not midpoint) so CMA-ES explores from a viable baseline.
 
-- Taichi kernels for all GPU operations
-- NumPy for CPU-side assembly
-- `ti.field` for GPU state, `ti.atomic_add` for parallel reductions
-- Separate clear/compute kernels to avoid race conditions
-- `load_particles()` resets per-particle state; no separate reset kernel needed
-- Grid cleared every substep in `substep()` kernel
+CMA-ES uses built-in bounds handling (not hard clipping) to preserve covariance estimation. Gene ranges passed as `CMA_stds` for proportional mutation scaling.
+
+## Key Experimental Findings (Experiment 1)
+
+- All 4+ independent runs converge to **same attractor within 10 generations** — wide flat-tipped bell, tips pressing against former upper bound (−0.03)
+- **Locked genes** (CV < 0.15): end_x ≈ 0.277, t_base ≈ 0.054, t_mid ≈ 0.045
+- **Dominant covariance coupling**: cp2_x ↔ end_y (−0.26 to −0.36): wider bell → shallower tip
+- **Ceiling exploit**: payload reaches y ≈ 0.88 within 3 cycles from spawn y=0.40
+- **Undissipated wake**: 35% of peak momentum remains at refractory end; vortex ring still organizing for 150ms into refractory before decaying
+- Best fitness plateau: ~0.53 (Exp 1), ceiling-limited not morphology-limited
+
+## Cloud Deployment
+
+Standard workflow via `deploy.sh` / `sync_results.sh`:
+
+```bash
+# Provision on vast.ai, then:
+bash deploy.sh <ssh_addr> <port>        # rsync + setup + launch experiments
+
+# Sync results back anytime:
+bash sync_results.sh <ssh_addr> <port> <label>
+
+# Destroy when done:
+vastai destroy instance <ID>
+```
+
+**Multi-GPU parallel runs** (4× 3080, one seed per GPU):
+```bash
+PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=0 JELLY_INSTANCES=32 \
+  uv run python evolve.py --gens 50 --seed 42 --run-id exp2_s42 > logs/s42.log 2>&1 &
+# repeat for CUDA_VISIBLE_DEVICES=1,2,3 with different seeds
+```
+
+`CUDA_VISIBLE_DEVICES` pins each process to one GPU; Taichi picks it up automatically.
 
 ## Usage
 
 ```bash
-# Evolve for 5 generations (quick test, ~6 min)
-uv run python evolve.py --gens 5
-
-# Full 50-generation run (~60 min)
-uv run python evolve.py
-
-# Resume from checkpoint (automatic if output/checkpoint.pkl exists)
-uv run python evolve.py --gens 50
-
-# Render best genomes as 4x4 video (rows=generations, columns=color-coded)
-uv run python evolve.py --view
-
-# Render all individuals from a specific generation (each cell = different individual)
-uv run python evolve.py --view --gen 3
-
-# Evaluate Aurelia aurita reference genome (baseline comparison)
-uv run python evolve.py --aurelia
-
-# Test morphology generator (matplotlib plot)
+# Quick morphology test (matplotlib plot)
 uv run python make_jelly.py
-uv run python make_jelly.py --aurelia             # Moon jelly reference
-uv run python make_jelly.py --aurelia --no-payload  # Payloadless (symmetry test)
+uv run python make_jelly.py --aurelia
 
-# Fluid dynamics test visualization
-uv run python helpers/fluid_test.py
+# Evolve (lambda set by JELLY_INSTANCES, default 16)
+JELLY_INSTANCES=32 uv run python evolve.py --gens 50 --seed 42 --run-id myrun
 
-# Payload sink baseline (no jellyfish, shows payload sinking under gravity)
+# Render single genome at full res (1024×1024), 15 cycles
+JELLY_INSTANCES=1 uv run python helpers/view_single.py --aurelia --steps 300000
+JELLY_INSTANCES=1 uv run python helpers/view_single.py --genome "[0.15,...]" --flow
+
+# Render a generation as 4×4 grid
+JELLY_INSTANCES=16 uv run python helpers/view_generation.py --gen 5 \
+    --log output/myrun/evolution_log_myrun.csv --palette random
+
+# 16 independently random jellyfish
+JELLY_INSTANCES=16 uv run python helpers/view_random.py --flow --steps 100000
+
+# Fluid dynamics analysis (captures grid momentum/vorticity over time → CSV)
+JELLY_INSTANCES=1 uv run python helpers/fluid_analysis.py --genome "[...]" --steps 60000
+
+# Payload sink baseline
 uv run python helpers/payload_sink.py
 
-# CAD export: generate STL files from a genome
-uv run python helpers/make_cad.py --aurelia           # Aurelia reference
-uv run python helpers/make_cad.py --gen 5             # Best genome from generation 5
-uv run python helpers/make_cad.py --diameter 120      # Physical scale in mm
-
-# Side-by-side comparison video (Aurelia vs Gen 0 vs Gen N)
-uv run python helpers/make_comparison.py
-
-# Actuation strength sweep across GPU batch
-uv run python tune_actuation.py
-
-# Quick single-genome preview — 1 instance = full 1024x1024 view (~4-5s)
-uv run python helpers/view_single.py --aurelia                   # Aurelia reference, full-res
-uv run python helpers/view_single.py --gen 5                     # Best from gen 5
-uv run python helpers/view_single.py --aurelia --flow            # With vorticity overlay
-uv run python helpers/view_single.py --aurelia --palette web     # Web palette
-uv run python helpers/view_single.py --aurelia --palette random  # Two contrasting colours
-uv run python helpers/view_single.py --aurelia --no-payload      # Payloadless symmetry
-uv run python helpers/view_single.py --gen 3 --instances 16     # 4x4 colour-variant grid
-
-# View all individuals from a generation (each GPU instance = different individual)
-# Handles any generation size; shows top N by fitness with clear count messaging
-uv run python helpers/view_generation.py --gen 5
-uv run python helpers/view_generation.py --gen 5 --include-invalid
-uv run python helpers/view_generation.py --gen 5 --palette random  # per-cell random colours
-uv run python helpers/view_generation.py --gen 5 --palette web
-
-# Web viewer (morphology explorer + evolutionary history + interactive designer)
+# Web viewer
 cd web && python app.py   # http://localhost:5000
-# /        — genome sliders, evolution history, convergence plots, click-drag Bezier
-# /custom  — interactive designer, colour picker, shared aquarium, fitness prediction
 ```
 
 ## Files
@@ -178,49 +187,55 @@ cd web && python app.py   # http://localhost:5000
 |------|---------|
 | mpm_sim.py | MPM physics engine + renderer + fitness kernels |
 | make_jelly.py | Morphology generator + tank filler + Aurelia reference |
-| evolve.py | CMA-ES evolutionary loop + visualization + Aurelia eval |
-| run_population.py | Batch population runner with CV2 rendering |
-| tune_actuation.py | Per-instance actuation strength sweep across GPU batch |
-| web/ | Flask web viewer: genome sliders, evolution history, convergence plots, click-drag Bezier; `/custom` interactive designer with shared aquarium |
-| pyproject.toml | Dependencies (taichi, numpy, scipy, cma, imageio, trimesh, flask, etc.) |
-| **helpers/** | Utility scripts (not required for core evolution loop) |
-| helpers/fluid_test.py | Fluid dynamics test visualization (oscillating paddle) |
-| helpers/make_cad.py | CAD export: genome → STL (extruded cross-section + revolved solid) |
-| helpers/make_comparison.py | Side-by-side comparison video: Aurelia vs Gen 0 vs Gen N |
-| helpers/payload_sink.py | Baseline demo: payload sinking without jellyfish (buoyancy check) |
-| helpers/view_single.py | Quick single-genome render (~4.5s); `--aurelia`, `--gen N`, `--flow`, `--no-payload` |
-| helpers/view_generation.py | View all individuals from one generation; each GPU instance = different morphology |
+| evolve.py | CMA-ES evolutionary loop + visualization |
+| helpers/view_single.py | Full-res single-genome render; `--flow` vorticity overlay |
+| helpers/view_generation.py | All individuals from one generation as N×N grid |
+| helpers/view_random.py | 16 independently random genomes; `--flow`, `--steps` |
+| helpers/fluid_analysis.py | Grid momentum/vorticity time-series for one genome |
+| helpers/payload_sink.py | Payload-only baseline (no jellyfish) |
+| helpers/fluid_test.py | Oscillating paddle fluid dynamics test |
+| helpers/make_cad.py | Genome → STL (extruded + revolved) |
+| helpers/make_comparison.py | Side-by-side comparison video |
+| helpers/tune_actuation.py | Actuation strength sweep across GPU batch |
+| web/ | Flask web viewer: genome sliders, history, Bezier editor, /custom designer |
+| setup_cloud.sh | Bootstrap cloud instance (uv, deps, X11 libs, GPU smoke test) |
+| deploy.sh | Full pipeline: rsync + setup + launch experiments |
+| run_experiments.sh | Sequential/parallel seed runner with rsync-back |
+| sync_results.sh | Pull output from remote instance to output/cloud/<label>/ |
+| CLOUD_TEST_PLAN.md | Cloud run runbook |
+| storage/EXPERIMENT_LOG.md | Full experiment history, methodology, results, analysis |
+| pyproject.toml | Dependencies; use `uv sync --extra simulation` for GPU deps |
 
 ## Output Files
 
-All outputs in `output/` directory:
+All outputs in `output/<run-id>/` (or `output/` for default runs):
 
 | File | Description |
 |------|-------------|
-| `evolution_log.csv` | Every individual: generation, genome[0-8], fitness, efficiency, displacement, drift, muscle_count, valid, sigma |
-| `best_genomes.json` | Best genome per generation (list of {generation, genome, fitness, efficiency, displacement, sigma}) |
-| `checkpoint.pkl` | CMA-ES state for crash recovery (every 5 gens) |
-| `view_*.mp4` | Rendered videos from --view mode |
-| `view_aurelia.mp4` | Aurelia aurita reference genome video |
-| `fluid_test.mp4` | Fluid dynamics test visualization |
+| `evolution_log_<id>.csv` | Every individual: generation, gene_0..gene_10, fitness, final_y, displacement, drift, muscle_count, valid, sigma, efficiency |
+| `best_genomes_<id>.json` | Best genome per generation + covariance diagnostics |
+| `checkpoint_<id>.pkl` | CMA-ES state for crash recovery (every 5 gens) |
+| `view_gen*.mp4` | Rendered generation grids |
+| `fluid_analysis_*.csv` | Grid momentum/vorticity time-series |
 
 ## Performance
 
-Benchmarked on a single CUDA GPU (quality=1, 128x128 grid, 80K particles, 16 instances batched):
-- Substep throughput: ~1.2 ms/step (all 16 instances in one batch)
-- Per-generation (λ=16): ~72s simulation + ~2s CPU phenotype generation
-- 50-generation run (λ=16): ~62 minutes total
-- Per-generation (λ=48, cloud): ~244s
-- CPU-GPU transfer: λ×5 floats per generation (fitness results)
-- GPU is SM-compute bound (~100% SM, ~6% VRAM at λ=16); two processes time-slice rather than parallelise — scale via larger λ in a single process
+| Hardware | λ | Steps/eval | Time/gen | 50-gen total |
+|----------|---|------------|----------|--------------|
+| RTX 4090 | 16 | 60K | ~74s | ~62 min |
+| RTX 4090 | 16 | 150K | ~112s | ~93 min |
+| RTX 3080 | 32 | 150K | ~212s | ~177 min |
+| 4× RTX 3080 | 32 each | 150K | ~212s | ~177 min (all 4 parallel) |
+
+GPU is SM-compute bound (~100% SM, ~6% VRAM at λ=16). Two processes on same GPU time-slice — use `CUDA_VISIBLE_DEVICES` to assign one process per GPU.
 
 ## Known Issues / TODO
 
-1. **No buoyancy model**: MPM has no hydrostatic buoyancy. Payload uses full gravity (2.5x density) and sinks; jellyfish must generate active thrust to lift it.
-2. **Mirror overlap**: Particles at x=0 duplicated by symmetry mirroring (density spike at midline)
-3. **No adaptive resolution**: Phase 1/2 transition (128->256 grid) not implemented
-4. **No genome heatmap**: Post-evolution gene importance visualization not implemented
-5. **No per-generation video**: Only manual --view mode, no automatic video per generation
-6. **No GPU energy tracking**: Full Cost of Transport metric deferred
-7. **Drift penalty disabled**: `- 1.0 * drift` term in `compute_fitness()` is commented out; lateral stability not currently penalized
-8. **Water lambda calibration**: lambda=100000 stiffens the fluid significantly — empirically stable but not physically justified
+1. **No buoyancy model**: payload sinks ~0.09 units/3-cycle run; jellyfish must overcome this plus generate net upward thrust
+2. **Mirror overlap**: particles at x=0 duplicated by symmetry mirroring (density spike at midline)
+3. **Ceiling exploit**: population saturates at y≈0.88 within ~10 gens; activity-weighted fitness partially addresses this by pivoting to efficiency
+4. **Undissipated wake**: 35% residual momentum at refractory end (Exp 1); evolved timing (Exp 2) should reduce this
+5. **No adaptive resolution**: 128→256 grid phase transition not implemented
+6. **Drift penalty disabled**: `- 1.0 * drift` commented out in `compute_fitness()`
+7. **Water speed of sound ~7× too slow**: deliberate for CFL stability; affects acoustic thrust realism
+8. **2D only**: no out-of-plane dynamics; overestimates thrust vs real 3D jellyfish
