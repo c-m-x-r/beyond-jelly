@@ -14,6 +14,7 @@ n_particles = int(os.environ.get('JELLY_PARTICLES', '80000'))
 n_grid = 128 * quality
 n_grid_y = int(os.environ.get('JELLY_GRID_Y', str(n_grid)))  # rows (y-axis); default = square
 domain_height = float(os.environ.get('JELLY_DOMAIN_H', '1.0'))  # physical domain height
+axisym = os.environ.get('JELLY_AXISYM', '0') == '1'  # axisymmetric (r,z) MPM — off by default
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 2e-5 / quality
 p_vol = (dx * 0.5) ** 2
@@ -80,7 +81,8 @@ res_sub = video_res // grid_side
 visual_glow = ti.field(dtype=float, shape=(n_instances, n_particles))
 
 # --- GPU MEMORY ALLOCATION ---
-print(f"Allocating {n_instances} instances with {n_particles} particles each...")
+print(f"Allocating {n_instances} instances with {n_particles} particles each..."
+      + (" [AXISYM mode: JELLY_AXISYM=1]" if axisym else ""))
 x = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 v = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 C = ti.Matrix.field(2, 2, dtype=float, shape=(n_instances, n_particles))
@@ -113,12 +115,22 @@ fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 # Defaults to actuation_strength; override per-instance for parameter sweeps
 instance_actuation = ti.field(dtype=float, shape=(n_instances,))
 
-# Per-instance pulse timing (genome genes 9, 10)
-# contraction_frac: fraction of period spent contracting  (default 0.20)
-# refractory_frac:  fraction of period in refractory rest (default 0.40)
-# relaxation_frac = 1 - contraction_frac - refractory_frac (clamped >= 0.05 in kernel)
+# Per-instance pulse timing (genome gene 9)
+# contraction_frac: fraction of period spent contracting (default 0.20)
+# refractory is implicit: 1 - contraction_frac (2-phase waveform; no relaxation ramp)
 instance_act_contraction = ti.field(dtype=float, shape=(n_instances,))
-instance_act_refractory  = ti.field(dtype=float, shape=(n_instances,))
+
+# Per-instance frequency multiplier (gene 10 in Experiment 3+; default 1.0 = no change)
+# Scales actuation frequency relative to the global actuation_freq constant.
+instance_freq = ti.field(dtype=float, shape=(n_instances,))
+
+# Axisymmetric MPM fields (always allocated; only written/read when axisym=True via JELLY_AXISYM=1)
+# r_ref:           reference radial position at spawn, for hoop-stretch calculation
+# grid_stress_rr:  per-node mass-weighted Kirchhoff σ_rr accumulation (P2G scratch)
+# grid_stress_hoop: per-node mass-weighted Kirchhoff σ_θθ accumulation (P2G scratch)
+r_ref            = ti.field(dtype=float, shape=(n_instances, n_particles))
+grid_stress_rr   = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
+grid_stress_hoop = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
 
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
@@ -134,7 +146,7 @@ for _i in range(n_instances):
     instance_actuation[_i] = actuation_strength
     instance_payload_density[_i] = 2.5
     instance_act_contraction[_i] = ACT_CONTRACTION_END        # 0.20
-    instance_act_refractory[_i]  = 1.0 - ACT_RELAXATION_END  # 0.40
+    instance_freq[_i] = 1.0
 
 # --- PHYSICS KERNELS ---
 
@@ -143,30 +155,30 @@ def substep():
     """Main Physics Step (P2G -> Grid -> G2P)."""
     # 0. Update Time & Pulse
     current_time = sim_time[None]
-    period = 1.0 / actuation_freq
-    phase = (current_time % period) / period
 
     # 1. Reset Grid
     for m, i, j in grid_m:
         grid_v[m, i, j] = [0, 0]
         grid_m[m, i, j] = 0
+        if ti.static(axisym):
+            grid_stress_rr[m, i, j] = 0.0
+            grid_stress_hoop[m, i, j] = 0.0
 
     # 2. P2G
     for m, p in x:
         if material[m, p] < 0: continue
 
-        # Per-instance raised-cosine activation
-        c_end   = instance_act_contraction[m]
-        ref_frac = instance_act_refractory[m]
-        relax_dur = ti.max(0.05, 1.0 - c_end - ref_frac)
-        relax_end = c_end + relax_dur
+        # Per-instance phase: frequency multiplied per-instance so each jellyfish
+        # can oscillate at a different rate (gene 10 in Exp 3+).
+        inst_period = 1.0 / (actuation_freq * instance_freq[m])
+        phase = (current_time % inst_period) / inst_period
+
+        # 2-phase waveform: half-cosine arch during contraction, then zero (refractory)
+        c_end = instance_act_contraction[m]
         activation = 0.0
         if phase < c_end:
             activation = 0.5 * (1.0 - ti.cos(phase / c_end * 3.14159265))
-        elif phase < relax_end:
-            rel_phase = (phase - c_end) / relax_dur
-            activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
-        # else: refractory — activation stays 0
+        # else: refractory — activation stays 0 (implicit: 1 - contraction_frac)
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
         if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid_y - 2: continue
@@ -220,18 +232,43 @@ def substep():
             fd = fiber_dir[m, p]
             stress += fd.outer_product(fd) * contractile_pressure * J
 
+        # Axisymmetric hoop-stress correction: compute before scaling.
+        # kirch_rr_val  = Kirchhoff σ_rr (accumulated on grid for hoop force term)
+        # kirch_hoop_val = Kirchhoff σ_θθ from circumferential stretch λ_θ = r / r_ref
+        # For water (mu=0): both equal la*J*(J-1), so correction vanishes automatically.
+        # For solid: linearised hoop: 2μ(λ_θ-1) + λJ(J-1).
+        kirch_rr_val = 0.0
+        kirch_hoop_val = 0.0
+        r_p_axisym = 0.0
+        if ti.static(axisym):
+            kirch_rr_val = stress[0, 0]
+            r_p_axisym = x[m, p][0]
+            r_ref_p = ti.max(r_ref[m, p], dx * 0.1)
+            lambda_theta = ti.max(r_p_axisym, dx * 0.05) / r_ref_p
+            kirch_hoop_val = 2.0 * mu * (lambda_theta - 1.0) + la * J * (J - 1.0)
+
         stress = (-dt * p_vol * 4 * inv_dx * inv_dx) * stress
-        
+
         # Affine momentum transfer (APIC)
         # Uses current_mass to properly weight the heavy payload
         affine = stress + current_mass * C[m, p]
-        
+
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
             dpos = (offset.cast(float) - fx) * dx
             weight = w[i][0] * w[j][1]
-            grid_v[m, base + offset] += weight * (current_mass * v[m, p] + affine @ dpos)
-            grid_m[m, base + offset] += weight * current_mass
+            if ti.static(axisym):
+                # Annular mass weighting: each particle represents a ring of radius r_p.
+                # Scale momentum and mass by r_p so grid normalization gives
+                # correctly r-weighted velocity averages.
+                grid_v[m, base + offset] += weight * (current_mass * r_p_axisym * v[m, p] + affine @ dpos)
+                grid_m[m, base + offset] += weight * current_mass * r_p_axisym
+                # Accumulate mass-weighted Kirchhoff stresses for hoop correction in grid update
+                grid_stress_rr[m, base + offset]   += weight * current_mass * kirch_rr_val
+                grid_stress_hoop[m, base + offset] += weight * current_mass * kirch_hoop_val
+            else:
+                grid_v[m, base + offset] += weight * (current_mass * v[m, p] + affine @ dpos)
+                grid_m[m, base + offset] += weight * current_mass
 
     # 3. Grid Operations
     for m, i, j in grid_m:
@@ -252,8 +289,21 @@ def substep():
             if j > n_grid_y - damp_cells_y: damp *= 0.95 + 0.05 * (n_grid_y - j) / damp_cells_y
             grid_v[m, i, j] *= damp
 
-            # Wall Collisions
-            if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
+            # Hoop stress geometric correction (axisym only).
+            # The r-momentum equation in cylindrical coords has an extra (σ_rr - σ_θθ)/r term.
+            # Apply it as a post-normalisation velocity correction.
+            if ti.static(axisym):
+                r_node = (i + 0.5) * dx  # cell-centre radius; avoids exact i=0 division
+                if r_node > dx:          # skip axis cell (i=0) — correction handled by BC below
+                    hoop_diff = (grid_stress_rr[m, i, j] - grid_stress_hoop[m, i, j]) / grid_m[m, i, j]
+                    grid_v[m, i, j][0] += dt * hoop_diff / r_node
+
+            # Wall Collisions / Axis BC
+            if ti.static(axisym):
+                # Axis of symmetry at i=0: enforce zero radial velocity
+                if i == 0: grid_v[m, i, j][0] = 0.0
+            else:
+                if i < 3 and grid_v[m, i, j][0] < 0: grid_v[m, i, j][0] = 0
             if i > n_grid - 3 and grid_v[m, i, j][0] > 0: grid_v[m, i, j][0] = 0
             if j < 3 and grid_v[m, i, j][1] < 0: grid_v[m, i, j][1] = 0
             if j > n_grid_y - 3 and grid_v[m, i, j][1] > 0: grid_v[m, i, j][1] = 0
@@ -336,9 +386,8 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
     """
     'Deep Sea Abyss' Renderer with Grid-Based Light Blue Gradient.
     """
-    # Re-calculate phase for visual sync (activation computed per-instance below)
-    period = 1.0 / actuation_freq
-    phase = (sim_time[None] % period) / period
+    # Re-calculate phase for visual sync (per-instance to match substep())
+    current_time_r = sim_time[None]
 
     grid_norm_factor = float(p_grid_side - 1) if p_grid_side > 1 else 1.0
 
@@ -347,17 +396,13 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         mat = material[m, p]
         if mat < 0 or pos[0] < 0: continue
 
-        # Per-instance activation for muscle colour sync
-        c_end_r    = instance_act_contraction[m]
-        ref_frac_r = instance_act_refractory[m]
-        relax_dur_r = ti.max(0.05, 1.0 - c_end_r - ref_frac_r)
-        relax_end_r = c_end_r + relax_dur_r
+        # Per-instance activation for muscle colour sync (matches 2-phase substep() waveform)
+        inst_period_r = 1.0 / (actuation_freq * instance_freq[m])
+        phase = (current_time_r % inst_period_r) / inst_period_r
+        c_end_r = instance_act_contraction[m]
         activation = 0.0
         if phase < c_end_r:
             activation = 0.5 * (1.0 - ti.cos(phase / c_end_r * 3.14159265))
-        elif phase < relax_end_r:
-            rp = (phase - c_end_r) / relax_dur_r
-            activation = 0.5 * (1.0 + ti.cos(rp * 3.14159265))
 
         # --- LIGHT CALCULATION ---
         vel = v[m, p].norm()
@@ -679,6 +724,7 @@ def _load_particles_kernel(instance: int, pos_np: ti.types.ndarray(),
         C[instance, p] = ti.Matrix.zero(float, 2, 2)
         Jp[instance, p] = 1.0
         fiber_dir[instance, p] = [fiber_np[p, 0], fiber_np[p, 1]]
+        r_ref[instance, p] = pos_np[p, 0]  # reference radial position for axisym hoop stretch
 
 
 def load_particles(instance, pos_np, mat_np, fiber_np=None):
@@ -706,6 +752,15 @@ def compute_payload_stats():
             ti.atomic_add(fitness_buffer[i, 1], 1.0)          # Count
             ti.atomic_add(fitness_buffer[i, 2], x[i, p][0])  # Sum X
 
+@ti.kernel
+def compute_body_stats():
+    """Accumulate jelly+muscle (Material 1+3) CoM — used in no-payload mode."""
+    for i, p in x:
+        if material[i, p] == 1 or material[i, p] == 3:
+            ti.atomic_add(fitness_buffer[i, 0], x[i, p][1])
+            ti.atomic_add(fitness_buffer[i, 1], 1.0)
+            ti.atomic_add(fitness_buffer[i, 2], x[i, p][0])
+
 def get_payload_stats():
     """Compute payload center of mass. Returns (n_instances, 3) array: [com_y, com_x, count]."""
     clear_fitness_buffer()
@@ -721,22 +776,46 @@ def get_payload_stats():
             stats[i, 2] = count
     return stats
 
+def _get_stats_any():
+    """Get CoM stats: payload if present, else jelly+muscle body (no-payload mode)."""
+    clear_fitness_buffer()
+    compute_payload_stats()
+    ti.sync()
+    raw = fitness_buffer.to_numpy()
+    # Detect no-payload instances (count==0) and fall back to body CoM
+    no_payload = raw[:, 1] == 0
+    if no_payload.any():
+        clear_fitness_buffer()
+        compute_body_stats()
+        ti.sync()
+        body_raw = fitness_buffer.to_numpy()
+        raw[no_payload] = body_raw[no_payload]
+    stats = np.zeros((n_instances, 3))
+    for i in range(n_instances):
+        count = raw[i, 1]
+        if count > 0:
+            stats[i, 0] = raw[i, 0] / count  # CoM Y
+            stats[i, 1] = raw[i, 2] / count  # CoM X
+            stats[i, 2] = count
+    return stats
+
 def run_batch_headless(steps):
     """
     Run simulation headlessly for all instances.
     Returns (n_instances, 5): [init_y, init_x, final_y, final_x, valid]
+    No-payload mode: tracks jelly+muscle body CoM instead of payload CoM.
     """
     sim_time[None] = 0.0
 
-    # Capture initial payload positions
-    initial = get_payload_stats()
+    # Capture initial positions (payload if present, else body CoM)
+    initial = _get_stats_any()
 
     # Run physics
     for _ in range(steps):
         substep()
 
-    # Capture final payload positions
-    final = get_payload_stats()
+    # Capture final positions
+    final = _get_stats_any()
 
     # Assemble results
     results = np.zeros((n_instances, 5))
@@ -746,12 +825,11 @@ def run_batch_headless(steps):
             results[i, 1] = initial[i, 1]  # init CoM X
             results[i, 2] = final[i, 0]    # final CoM Y
             results[i, 3] = final[i, 1]    # final CoM X
-            # Only invalidate if payload sinks to floor (genuine failure)
+            # In no-payload mode the body CoM y is never near 0 (bell starts at 0.40+),
+            # so the 0.01 floor check remains a safe validity gate for both modes.
             if final[i, 0] < 0.01:
-                results[i, 4] = 0.0  # Invalid: payload lost to floor
+                results[i, 4] = 0.0  # Invalid: body/payload lost to floor
             else:
                 results[i, 4] = 1.0  # Valid
-        else:
-            results[i, 4] = 0.0  # Invalid: payload lost
     return results
 
