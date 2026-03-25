@@ -118,13 +118,9 @@ def main():
             row['step'] = step
             row['t'] = t
             row['phase'] = phase
-            # Actuation phase label
-            if phase < 0.2:
-                row['act_phase'] = 'contract'
-            elif phase < 0.6:
-                row['act_phase'] = 'relax'
-            else:
-                row['act_phase'] = 'refractory'
+            # Actuation phase label (2-phase: contract then refractory)
+            c_frac = float(genome[9]) if len(genome) > 9 else 0.20
+            row['act_phase'] = 'contract' if phase < c_frac else 'refractory'
             records.append(row)
 
     with open(output_path, 'w', newline='') as f:

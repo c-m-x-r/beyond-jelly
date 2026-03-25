@@ -401,7 +401,7 @@ def random_genome():
     genome[7] = np.random.uniform(0.025, 0.1)   # t_mid
     genome[8] = np.random.uniform(0.01,  0.04)  # t_tip
     genome[9] = 0.20                             # act_contraction_frac (start at default)
-    genome[10] = 0.40                            # act_refractory_frac  (start at default)
+    genome[10] = 1.0                             # freq_mult (1.0 = no frequency change)
     return genome
 
 

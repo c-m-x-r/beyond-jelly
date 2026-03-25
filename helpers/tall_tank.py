@@ -119,9 +119,9 @@ def main():
 
     # Apply timing genes if present (genes 9 and 10)
     if len(genome) > 9:
-        sim.instance_act_contraction[0] = float(np.clip(genome[9],  0.05, 0.40))
+        sim.instance_act_contraction[0] = float(np.clip(genome[9],  0.05, 0.60))
     if len(genome) > 10:
-        sim.instance_act_refractory[0]  = float(np.clip(genome[10], 0.20, 0.75))
+        sim.instance_freq[0] = float(np.clip(genome[10], 0.5, 2.0))
 
     # Simulation parameters
     steps_per_cycle = int(round(1.0 / (sim.actuation_freq * sim.dt)))

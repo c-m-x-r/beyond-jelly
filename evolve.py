@@ -52,15 +52,15 @@ OUTPUT_DIR = "output"
 
 # Genome bounds: [cp1_x, cp1_y, cp2_x, cp2_y, end_x, end_y, t_base, t_mid, t_tip]
 # Genes 0-8: morphology (Bezier shape + thickness)
-# Gene  9:   act_contraction_frac — fraction of period spent contracting  [0.05, 0.40]
-# Gene 10:   act_refractory_frac  — fraction of period in refractory rest [0.20, 0.75]
-#            relaxation_frac = 1 - contraction - refractory (clamped ≥ 0.05 in kernel)
-GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05,  -0.30,  0.025,  0.025,  0.01,  0.05,  0.20]
-GENOME_UPPER = [0.25,  0.15,  0.3,   0.15, 0.35,  +0.10,  0.08,   0.1,    0.04,  0.40,  0.75]
+# Gene  9:   act_contraction_frac — fraction of period spent contracting  [0.05, 0.60]
+# Gene 10:   freq_mult            — actuation frequency multiplier        [0.5, 2.0]
+#            refractory is implicit: 1 - contraction_frac (2-phase waveform)
+GENOME_LOWER = [0.0, -0.15,  0.0,  -0.2,  0.05,  -0.30,  0.025,  0.025,  0.01,  0.05,  0.5]
+GENOME_UPPER = [0.25,  0.15,  0.3,   0.15, 0.35,  +0.10,  0.08,   0.1,    0.04,  0.60,  2.0]
 GENOME_X0 = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 # Override timing genes to start at known-good defaults rather than midpoint
 GENOME_X0[9]  = 0.20   # contraction_frac default
-GENOME_X0[10] = 0.40   # refractory_frac default
+GENOME_X0[10] = 1.0    # freq_mult default (no frequency change)
 
 # Fitness constants
 PENALTY_INVALID = 100.0
@@ -104,16 +104,14 @@ def compute_fitness(sim_results, muscle_counts, genomes=None):
         if _FITNESS_MODE == 'displacement':
             raw.append(-displacement)  # CMA-ES minimises; negate for maximisation
         else:
-            # Effective muscle cost: penalise both particle count and active fraction.
-            # active_frac = 1 - refractory_frac (fraction of cycle with muscle firing).
-            # A jellyfish that rests more uses less total muscle energy per cycle.
+            # Effective muscle cost: penalise particle count × active fraction.
+            # active_frac = contraction_frac (gene 9) — refractory is 1 - contraction_frac.
             # integral of raised-cosine over one active phase = 0.5 × active_duration,
-            # so effective_cost ∝ muscle_count × (1 - refractory_frac).
-            if genomes is not None and len(genomes[i]) > 10:
-                refractory_frac = float(np.clip(genomes[i][10], 0.20, 0.75))
+            # so effective_cost ∝ muscle_count × contraction_frac.
+            if genomes is not None and len(genomes[i]) > 9:
+                active_frac = float(np.clip(genomes[i][9], 0.05, 0.60))
             else:
-                refractory_frac = 0.40   # legacy default
-            active_frac = 1.0 - refractory_frac
+                active_frac = 0.20   # legacy default
             effective_muscle = muscle_counts[i] * active_frac
             muscle_cost = (effective_muscle / MUSCLE_REFERENCE) ** 0.5
             raw.append(-displacement / muscle_cost)  # CMA-ES minimises
@@ -149,9 +147,9 @@ def load_batch(genomes):
 
         # Apply timing genes if present
         if len(genome) > 9:
-            sim.instance_act_contraction[i] = float(np.clip(genome[9],  0.05, 0.40))
+            sim.instance_act_contraction[i] = float(np.clip(genome[9],  0.05, 0.60))
         if len(genome) > 10:
-            sim.instance_act_refractory[i]  = float(np.clip(genome[10], 0.20, 0.75))
+            sim.instance_freq[i] = float(np.clip(genome[10], 0.5, 2.0))
 
     ti.sync()
     return muscle_counts, instance_stats
@@ -266,6 +264,15 @@ def load_checkpoint(filepath):
         with open(filepath, 'rb') as f:
             checkpoint = pickle.load(f)
         es = pickle.loads(checkpoint['cma_state'])
+        # Detect Experiment 2 checkpoints: gene 10 was refractory_frac in [0.20, 0.75].
+        # Experiment 3+ uses freq_mult in [0.5, 2.0]. An Exp2 checkpoint will have a
+        # CMA-ES mean with gene 10 ≈ 0.40, which is below the new lower bound of 0.5.
+        if len(es.mean) > 10 and float(es.mean[10]) < GENOME_LOWER[10]:
+            print("ERROR: Checkpoint gene 10 mean ({:.3f}) is below the current lower bound "
+                  "({}) — this looks like an Experiment 2 checkpoint (refractory_frac) being "
+                  "resumed with an Experiment 3 encoding (freq_mult). "
+                  "Aborting to prevent silent corruption.".format(float(es.mean[10]), GENOME_LOWER[10]))
+            return None
         print(f"Resumed from checkpoint at generation {checkpoint['generation']}")
         return es, checkpoint['generation'], checkpoint['history']
     except Exception as e:

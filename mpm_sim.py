@@ -113,12 +113,10 @@ fiber_dir = ti.Vector.field(2, dtype=float, shape=(n_instances, n_particles))
 # Defaults to actuation_strength; override per-instance for parameter sweeps
 instance_actuation = ti.field(dtype=float, shape=(n_instances,))
 
-# Per-instance pulse timing (genome genes 9, 10)
-# contraction_frac: fraction of period spent contracting  (default 0.20)
-# refractory_frac:  fraction of period in refractory rest (default 0.40)
-# relaxation_frac = 1 - contraction_frac - refractory_frac (clamped >= 0.05 in kernel)
+# Per-instance pulse timing (genome gene 9)
+# contraction_frac: fraction of period spent contracting (default 0.20)
+# refractory is implicit: 1 - contraction_frac (2-phase waveform; no relaxation ramp)
 instance_act_contraction = ti.field(dtype=float, shape=(n_instances,))
-instance_act_refractory  = ti.field(dtype=float, shape=(n_instances,))
 
 # Per-instance frequency multiplier (gene 10 in Experiment 3+; default 1.0 = no change)
 # Scales actuation frequency relative to the global actuation_freq constant.
@@ -138,7 +136,6 @@ for _i in range(n_instances):
     instance_actuation[_i] = actuation_strength
     instance_payload_density[_i] = 2.5
     instance_act_contraction[_i] = ACT_CONTRACTION_END        # 0.20
-    instance_act_refractory[_i]  = 1.0 - ACT_RELAXATION_END  # 0.40
     instance_freq[_i] = 1.0
 
 # --- PHYSICS KERNELS ---
@@ -163,18 +160,12 @@ def substep():
         inst_period = 1.0 / (actuation_freq * instance_freq[m])
         phase = (current_time % inst_period) / inst_period
 
-        # Per-instance raised-cosine activation
-        c_end   = instance_act_contraction[m]
-        ref_frac = instance_act_refractory[m]
-        relax_dur = ti.max(0.05, 1.0 - c_end - ref_frac)
-        relax_end = c_end + relax_dur
+        # 2-phase waveform: half-cosine arch during contraction, then zero (refractory)
+        c_end = instance_act_contraction[m]
         activation = 0.0
         if phase < c_end:
             activation = 0.5 * (1.0 - ti.cos(phase / c_end * 3.14159265))
-        elif phase < relax_end:
-            rel_phase = (phase - c_end) / relax_dur
-            activation = 0.5 * (1.0 + ti.cos(rel_phase * 3.14159265))
-        # else: refractory — activation stays 0
+        # else: refractory — activation stays 0 (implicit: 1 - contraction_frac)
 
         base = (x[m, p] * inv_dx - 0.5).cast(int)
         if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid_y - 2: continue
@@ -354,19 +345,13 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         mat = material[m, p]
         if mat < 0 or pos[0] < 0: continue
 
-        # Per-instance activation for muscle colour sync
+        # Per-instance activation for muscle colour sync (matches 2-phase substep() waveform)
         inst_period_r = 1.0 / (actuation_freq * instance_freq[m])
         phase = (current_time_r % inst_period_r) / inst_period_r
-        c_end_r    = instance_act_contraction[m]
-        ref_frac_r = instance_act_refractory[m]
-        relax_dur_r = ti.max(0.05, 1.0 - c_end_r - ref_frac_r)
-        relax_end_r = c_end_r + relax_dur_r
+        c_end_r = instance_act_contraction[m]
         activation = 0.0
         if phase < c_end_r:
             activation = 0.5 * (1.0 - ti.cos(phase / c_end_r * 3.14159265))
-        elif phase < relax_end_r:
-            rp = (phase - c_end_r) / relax_dur_r
-            activation = 0.5 * (1.0 + ti.cos(rp * 3.14159265))
 
         # --- LIGHT CALCULATION ---
         vel = v[m, p].norm()
