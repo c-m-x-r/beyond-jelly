@@ -1,4 +1,4 @@
-// Gene definitions
+// Gene definitions (11D genome: 9 morphology + 2 actuation timing)
 const GENES = [
     { name: 'CP1 X', key: 'cp1_x', idx: 0 },
     { name: 'CP1 Y', key: 'cp1_y', idx: 1 },
@@ -9,6 +9,8 @@ const GENES = [
     { name: 'Thickness Base', key: 't_base', idx: 6 },
     { name: 'Thickness Mid', key: 't_mid', idx: 7 },
     { name: 'Thickness Tip', key: 't_tip', idx: 8 },
+    { name: 'Contraction Frac', key: 'act_contraction', idx: 9 },
+    { name: 'Refractory Frac', key: 'act_refractory', idx: 10 },
 ];
 
 // State
@@ -204,13 +206,13 @@ function loadFromJson() {
         const textarea = document.getElementById('genome-json');
         const genome = JSON.parse(textarea.value);
 
-        if (!Array.isArray(genome) || genome.length !== 9) {
-            alert('Invalid genome: must be array of 9 numbers');
+        if (!Array.isArray(genome) || (genome.length !== 9 && genome.length !== 11)) {
+            alert('Invalid genome: must be array of 9 or 11 numbers');
             return;
         }
 
-        // Validate bounds
-        for (let i = 0; i < 9; i++) {
+        // Validate bounds for however many genes are present
+        for (let i = 0; i < genome.length; i++) {
             if (genome[i] < bounds.lower[i] || genome[i] > bounds.upper[i]) {
                 alert(`Gene ${i} out of bounds: ${genome[i]} not in [${bounds.lower[i]}, ${bounds.upper[i]}]`);
                 return;
@@ -384,6 +386,10 @@ function populateIndividualTable(individuals) {
 
 function loadIndividual(ind) {
     currentGenome = [...ind.genome];
+    // Pad 9-gene (legacy) genomes with defaults for timing genes 9 & 10
+    while (currentGenome.length < GENES.length) {
+        currentGenome.push(bounds.default[currentGenome.length]);
+    }
     updateSliders();
     updateGenomeDisplay();
     renderMorphology();

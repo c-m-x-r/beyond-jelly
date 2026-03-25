@@ -26,7 +26,7 @@ import pickle
 
 # Pre-parse --instances and --tall so env vars are set before mpm_sim import (Taichi allocates on import)
 _pre = argparse.ArgumentParser(add_help=False)
-_pre.add_argument('--instances', type=int, default=16)
+_pre.add_argument('--instances', type=int, default=int(os.environ.get('JELLY_INSTANCES', 16)))
 _pre.add_argument('--tall', action='store_true')
 _pre_args, _ = _pre.parse_known_args()
 os.environ['JELLY_INSTANCES'] = str(_pre_args.instances)
@@ -763,6 +763,8 @@ def main():
                         help="CMA-ES random seed (default: 42; use different values for independent replicate runs)")
     parser.add_argument('--instances', type=int, default=16,
                         help="Number of parallel GPU instances / CMA-ES population size (default: 16)")
+    parser.add_argument('--tall', action='store_true',
+                        help="Use 128x256 tall tank (160K particles, domain_height=2.0) to remove ceiling exploit")
     args = parser.parse_args()
 
     global OUTPUT_DIR

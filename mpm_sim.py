@@ -93,6 +93,16 @@ grid_m = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
 sim_time = ti.field(dtype=float, shape=())
 frame_buffer = ti.field(dtype=float, shape=(video_res, video_res, 3))
 
+# Water rendering mode:
+#   0 = ghost (near-invisible, clean canvas for vorticity overlay)
+#   1 = plain blue, speed-brightness
+#   2 = rainbow angle-colourised
+water_angle_color = ti.field(dtype=int, shape=())
+
+# Vorticity scratch buffer: normalised curl per grid cell, in (-1, 1)
+# Filled by compute_vorticity_grid(); consumed by render_vorticity_rdbu / render_vorticity_hueshift
+vort_grid = ti.field(dtype=float, shape=(n_instances, n_grid, n_grid_y))
+
 # Fitness evaluation buffer: [sum_y, count, sum_x] per instance
 fitness_buffer = ti.field(dtype=float, shape=(n_instances, 3))
 
@@ -360,15 +370,29 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         norm_x = float(col_idx) / grid_norm_factor
         norm_y = float(row_idx) / grid_norm_factor
 
-        if mat == 0: # WATER — velocity-direction colourised for flow/vortex visibility
-            if vel > 0.02:
-                vx_n = v[m, p][0]
-                vy_n = v[m, p][1]
-                flow_angle = ti.atan2(vy_n, vx_n)
-                hue = (flow_angle / (2.0 * 3.14159265) + 0.5) % 1.0
-                brightness = ti.min(vel / 2.0, 1.0)
-                color = hsv2rgb(hue, 0.8, brightness)
-                intensity = 0.025 + 0.075 * brightness
+        if mat == 0: # WATER
+            wmode = water_angle_color[None]
+            if wmode == 0:
+                # Ghost: barely-there neutral so vorticity overlay reads cleanly
+                if vel > 0.02:
+                    color = ti.Vector([0.15, 0.15, 0.18])
+                    intensity = 0.008
+            elif wmode == 1:
+                # Plain: fixed cool hue, speed → brightness
+                if vel > 0.02:
+                    brightness = ti.min(vel / 2.0, 1.0)
+                    color = hsv2rgb(0.60, 0.55, brightness)
+                    intensity = 0.025 + 0.075 * brightness
+            else:
+                # Rainbow: full hue wheel mapped to velocity direction
+                if vel > 0.02:
+                    brightness = ti.min(vel / 2.0, 1.0)
+                    vx_n = v[m, p][0]
+                    vy_n = v[m, p][1]
+                    flow_angle = ti.atan2(vy_n, vx_n)
+                    hue = (flow_angle / (2.0 * 3.14159265) + 0.5) % 1.0
+                    color = hsv2rgb(hue, 0.8, brightness)
+                    intensity = 0.025 + 0.075 * brightness
 
         elif mat == 1: # JELLY
             hue = instance_hue[m]
@@ -487,6 +511,160 @@ def render_vorticity_overlay(p_res_sub: int, p_grid_side: int, vort_scale: float
                     frame_buffer[py, px, 0] += col[0] * 0.5
                     frame_buffer[py, px, 1] += col[1] * 0.5
                     frame_buffer[py, px, 2] += col[2] * 0.5
+
+
+@ti.kernel
+def compute_vorticity_grid(vort_scale: float):
+    """
+    Pre-compute normalised vorticity into vort_grid.
+    curl = dvx/dy - dvy/dx per cell; tanh-mapped to (-1, 1).
+    Call once per frame before render_vorticity_rdbu or render_vorticity_hueshift.
+    """
+    for m, i, j in vort_grid:
+        vort_grid[m, i, j] = 0.0
+    for m, i, j in grid_v:
+        if i < 1 or i >= n_grid - 1 or j < 1 or j >= n_grid_y - 1:
+            continue
+        if grid_m[m, i, j] <= 0.0:
+            continue
+        dvx_dy = (grid_v[m, i, j + 1][0] - grid_v[m, i, j - 1][0]) / (2.0 * dx)
+        dvy_dx = (grid_v[m, i + 1, j][1] - grid_v[m, i - 1, j][1]) / (2.0 * dx)
+        curl = dvx_dy - dvy_dx
+        vort_grid[m, i, j] = ti.tanh(curl * vort_scale)
+
+
+@ti.kernel
+def render_vorticity_rdbu(p_res_sub: int, p_grid_side: int, alpha_max: float):
+    """
+    Post-tonemapping RdBu overlay.  Call AFTER tone_map_and_encode().
+
+    Maps vort_grid → red (+) / blue (−) and alpha-composites over the LDR frame_buffer.
+    alpha = alpha_max * |vort|  so near-zero cells are fully transparent.
+
+    alpha_max: maximum opacity at |vort|=1.  Recommended 0.55–0.70.
+    """
+    for px, py in ti.ndrange(video_res, video_res):
+        # Map pixel back to the instance and grid cell it belongs to
+        col  = px * p_grid_side // video_res
+        row  = py * p_grid_side // video_res
+        m    = row * p_grid_side + col
+        if m >= n_instances:
+            continue
+
+        # Inverse of: px = (i/n_grid/domain_height + col) * p_res_sub
+        #             py = (1 - j/n_grid_y + row) * p_res_sub
+        sub_x = (px - col * p_res_sub) / float(p_res_sub)       # = i / n_grid / domain_height
+        sub_y = 1.0 - (py - row * p_res_sub) / float(p_res_sub) # = j / n_grid_y
+
+        gi = int(sub_x * n_grid * domain_height)
+        gj = int(sub_y * n_grid_y)
+        if gi < 0 or gi >= n_grid or gj < 0 or gj >= n_grid_y:
+            continue
+
+        vort = vort_grid[m, gi, gj]
+        mag  = ti.abs(vort)
+        if mag < 0.02:
+            continue
+
+        alpha = alpha_max * mag
+        # Red (CCW +) blends toward (0.84, 0.10, 0.11); Blue (CW −) toward (0.13, 0.31, 0.80)
+        t = 0.5 + 0.5 * ti.math.sign(vort)   # 1.0 if CCW, 0.0 if CW
+        col_r = t * 0.84 + (1.0 - t) * 0.13
+        col_g = t * 0.10 + (1.0 - t) * 0.31
+        col_b = t * 0.11 + (1.0 - t) * 0.80
+
+        frame_buffer[py, px, 0] = (1.0 - alpha) * frame_buffer[py, px, 0] + alpha * col_r
+        frame_buffer[py, px, 1] = (1.0 - alpha) * frame_buffer[py, px, 1] + alpha * col_g
+        frame_buffer[py, px, 2] = (1.0 - alpha) * frame_buffer[py, px, 2] + alpha * col_b
+
+
+@ti.kernel
+def render_vorticity_hueshift(p_res_sub: int, p_grid_side: int, strength: float):
+    """
+    Post-tonemapping hue-shift overlay.  Call AFTER tone_map_and_encode().
+
+    Blends each pixel toward red (CCW) or blue (CW) proportional to |vort|,
+    leaving the underlying particle colour intact in irrotational regions.
+    Subtler than RdBu: the jellyfish and water retain their identity while
+    vortex structures become warm/cool tinted.
+
+    strength: blend fraction at |vort|=1.  Recommended 0.45–0.65.
+    """
+    for px, py in ti.ndrange(video_res, video_res):
+        col  = px * p_grid_side // video_res
+        row  = py * p_grid_side // video_res
+        m    = row * p_grid_side + col
+        if m >= n_instances:
+            continue
+
+        sub_x = (px - col * p_res_sub) / float(p_res_sub)
+        sub_y = 1.0 - (py - row * p_res_sub) / float(p_res_sub)
+
+        gi = int(sub_x * n_grid * domain_height)
+        gj = int(sub_y * n_grid_y)
+        if gi < 0 or gi >= n_grid or gj < 0 or gj >= n_grid_y:
+            continue
+
+        vort = vort_grid[m, gi, gj]
+        mag  = ti.abs(vort)
+        if mag < 0.02:
+            continue
+
+        alpha = strength * mag
+        # Warm red (CCW +): (0.90, 0.18, 0.15); cool blue (CW −): (0.15, 0.35, 0.90)
+        t = 0.5 + 0.5 * ti.math.sign(vort)
+        col_r = t * 0.90 + (1.0 - t) * 0.15
+        col_g = t * 0.18 + (1.0 - t) * 0.35
+        col_b = t * 0.15 + (1.0 - t) * 0.90
+
+        frame_buffer[py, px, 0] = (1.0 - alpha) * frame_buffer[py, px, 0] + alpha * col_r
+        frame_buffer[py, px, 1] = (1.0 - alpha) * frame_buffer[py, px, 1] + alpha * col_g
+        frame_buffer[py, px, 2] = (1.0 - alpha) * frame_buffer[py, px, 2] + alpha * col_b
+
+
+@ti.kernel
+def render_vorticity_white(p_res_sub: int, p_grid_side: int, alpha_max: float):
+    """
+    White-background vorticity-only render.  Clears frame_buffer to white then
+    paints RdBu cells from vort_grid (must be pre-computed).  No particles rendered.
+    Call standalone — does not require tone_map_and_encode().
+    """
+    # Clear to white
+    for i, j, c in frame_buffer:
+        frame_buffer[i, j, c] = 1.0
+
+    # Paint vorticity
+    for px, py in ti.ndrange(video_res, video_res):
+        col  = px * p_grid_side // video_res
+        row  = py * p_grid_side // video_res
+        m    = row * p_grid_side + col
+        if m >= n_instances:
+            continue
+
+        sub_x = (px - col * p_res_sub) / float(p_res_sub)
+        sub_y = 1.0 - (py - row * p_res_sub) / float(p_res_sub)
+
+        gi = int(sub_x * n_grid * domain_height)
+        gj = int(sub_y * n_grid_y)
+        if gi < 0 or gi >= n_grid or gj < 0 or gj >= n_grid_y:
+            continue
+
+        vort = vort_grid[m, gi, gj]
+        mag  = ti.abs(vort)
+        if mag < 0.02:
+            continue
+
+        alpha = alpha_max * mag
+        # Red (CCW +): (0.84, 0.10, 0.11); Blue (CW −): (0.13, 0.31, 0.80)
+        t     = 0.5 + 0.5 * ti.math.sign(vort)
+        col_r = t * 0.84 + (1.0 - t) * 0.13
+        col_g = t * 0.10 + (1.0 - t) * 0.31
+        col_b = t * 0.11 + (1.0 - t) * 0.80
+
+        # Alpha-composite over white (1,1,1)
+        frame_buffer[py, px, 0] = (1.0 - alpha) + alpha * col_r
+        frame_buffer[py, px, 1] = (1.0 - alpha) + alpha * col_g
+        frame_buffer[py, px, 2] = (1.0 - alpha) + alpha * col_b
 
 
 @ti.kernel

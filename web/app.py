@@ -4,6 +4,7 @@ Flask backend for jellyfish morphology visualization.
 """
 
 from flask import Flask, render_template, jsonify, request, send_from_directory
+import math
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -163,6 +164,8 @@ def parse_evolution_log(rel_path='evolution_log.csv'):
     rows = []
     with open(csv_path, 'r') as f:
         reader = csv.DictReader(f)
+        # Detect genome dimensionality from headers
+        n_genes = sum(1 for k in (reader.fieldnames or []) if k.startswith('gene_'))
         for row in reader:
             # Skip duplicate header rows from resumed runs
             if row['generation'] == 'generation':
@@ -170,7 +173,7 @@ def parse_evolution_log(rel_path='evolution_log.csv'):
             rows.append({
                 'generation': int(row['generation']),
                 'individual': int(row['individual']),
-                'genome': [float(row[f'gene_{i}']) for i in range(9)],
+                'genome': [float(row[f'gene_{i}']) for i in range(n_genes)],
                 'fitness': float(row['fitness']),
                 'final_y': float(row['final_y']),
                 'displacement': float(row['displacement']),
@@ -242,15 +245,15 @@ def api_evolution_generation(gen):
 
 @app.route('/api/render/grid', methods=['POST'])
 def api_render_grid():
-    """Render up to 16 morphologies in a 4x4 grid."""
+    """Render morphologies in an auto-sized grid (up to 64 individuals)."""
     data = request.get_json()
     individuals = data.get('individuals', [])
 
-    if not individuals or len(individuals) > 16:
-        return jsonify({'error': 'Provide 1-16 individuals'})
+    if not individuals or len(individuals) > 64:
+        return jsonify({'error': 'Provide 1-64 individuals'})
 
     n = len(individuals)
-    cols = 4
+    cols = min(8, math.ceil(math.sqrt(n)))
     rows = (n + cols - 1) // cols
 
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 5),
@@ -456,9 +459,16 @@ def predict_performance(genome):
     if not valid_rows:
         return None
 
-    ranges = np.array(GENOME_UPPER) - np.array(GENOME_LOWER)
-    query_norm = (np.array(genome) - np.array(GENOME_LOWER)) / ranges
-    genomes_norm = (np.array([r['genome'] for r in valid_rows]) - np.array(GENOME_LOWER)) / ranges
+    n_dims = len(genome)
+    lower = np.array(GENOME_LOWER[:n_dims])
+    upper = np.array(GENOME_UPPER[:n_dims])
+    ranges = upper - lower
+    query_norm = (np.array(genome) - lower) / ranges
+    # Only compare shared dimensions when row genomes may differ in length
+    genomes_norm = np.array([
+        (np.array(r['genome'][:n_dims]) - lower) / ranges
+        for r in valid_rows
+    ])
     distances = np.linalg.norm(genomes_norm - query_norm, axis=1)
     nearest = valid_rows[int(np.argmin(distances))]
 

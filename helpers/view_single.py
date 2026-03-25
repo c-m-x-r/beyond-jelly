@@ -44,6 +44,11 @@ import mpm_sim as sim
 from mpm_sim import WEB_PALETTE
 from make_jelly import fill_tank, AURELIA_GENOME, random_genome
 
+import csv
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 OUTPUT_DIR = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "output")
 RENDER_EVERY = 500
 FPS = 30
@@ -91,8 +96,8 @@ def load_genome(args):
         except Exception as e:
             print(f"ERROR parsing --genome: {e}")
             _sys.exit(1)
-        if len(g) != 9:
-            print(f"ERROR: genome must have 9 values, got {len(g)}")
+        if len(g) not in (9, 11):
+            print(f"ERROR: genome must have 9 or 11 values, got {len(g)}")
             _sys.exit(1)
         print(f"Genome: from CLI  {g.round(4)}")
         return g, "custom"
@@ -100,6 +105,49 @@ def load_genome(args):
     genome = random_genome()
     print(f"Genome: random  {genome.round(4)}")
     return genome, "random"
+
+
+def _save_payload_track(times, ys, label, video_path):
+    """Write payload CoM trajectory to CSV and a matplotlib plot."""
+    base = video_path.replace(".mp4", "")
+    csv_path  = base + "_payload_track.csv"
+    plot_path = base + "_payload_track.png"
+
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["time_s", "payload_com_y"])
+        w.writerows(zip(times, ys))
+    print(f"  Track CSV → {csv_path}")
+
+    t = np.array(times)
+    y = np.array(ys)
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    # Cycle boundary lines
+    cycle_period = 1.0 / sim.actuation_freq
+    t_max = t[-1]
+    cycle_n = int(t_max / cycle_period) + 1
+    for c in range(1, cycle_n):
+        ax.axvline(c * cycle_period, color="0.75", linewidth=0.8, linestyle="--", zorder=1)
+
+    ax.plot(t, y, color="#e87d52", linewidth=1.6, zorder=2)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Payload CoM  y")
+    ax.set_title(f"Payload vertical position — {label}")
+    ax.set_xlim(t[0], t[-1])
+
+    # Annotate net rise
+    net = y[-1] - y[0]
+    sign = "+" if net >= 0 else ""
+    ax.annotate(f"net {sign}{net:.4f}", xy=(t[-1], y[-1]),
+                xytext=(-8, 8), textcoords="offset points",
+                ha="right", fontsize=9, color="#444")
+
+    fig.tight_layout()
+    fig.savefig(plot_path, dpi=150)
+    plt.close(fig)
+    print(f"  Track plot → {plot_path}")
 
 
 def main():
@@ -118,7 +166,9 @@ def main():
                         help="Colour scheme: abyss (dark HDR), web (flat light), "
                              "random (two contrasting colours). Default: abyss")
     parser.add_argument("--flow", action="store_true",
-                        help="Add vorticity overlay (abyss/random palettes only)")
+                        help="Also render a white-bg RdBu vorticity video alongside the main output")
+    parser.add_argument("--rainbow", action="store_true",
+                        help="Colour water particles by velocity direction (full hue wheel)")
     parser.add_argument("--steps", type=int, default=60000,
                         help="Simulation substeps (default: 60000 = 3 cycles)")
     parser.add_argument("--instances", type=int, default=_pre_args.instances,
@@ -126,6 +176,8 @@ def main():
                              "16 = 4x4 colour-variant grid)")
     parser.add_argument("--output", type=str, default=None,
                         help="Output MP4 path (default: output/view_single_<label>.mp4)")
+    parser.add_argument("--track", action="store_true",
+                        help="Record payload CoM y over time → CSV + plot")
     args = parser.parse_args()
 
     genome, label = load_genome(args)
@@ -157,39 +209,63 @@ def main():
     # web palette: colours defined per-material in WEB_PALETTE, no per-instance hues needed
 
     sim.sim_time[None] = 0.0
+    use_flow = args.flow and args.palette != "web"
+    sim.water_angle_color[None] = 2 if args.rainbow else 1   # 2=rainbow, 1=plain blue
+
     radius = max(1.0, sim.res_sub / sim.n_grid * 0.6)
     total_frames = args.steps // RENDER_EVERY
-    use_flow = args.flow and args.palette != "web"
+    vort_path = output_path.replace(".mp4", "_vorticity.mp4")
 
     palette_label = args.palette + ("+flow" if use_flow else "")
     print(f"Rendering {total_frames} frames "
           f"({args.steps} steps, every {RENDER_EVERY} substeps, "
           f"palette: {palette_label}, instances: {sim.n_instances})...")
+    if use_flow:
+        print(f"  Vorticity video → {vort_path}")
 
     _os.makedirs(OUTPUT_DIR, exist_ok=True)
     frames = []
+    frames_vort = []
+    track_t = []
+    track_y = []
 
     for step in range(args.steps):
         sim.substep()
 
         if step % RENDER_EVERY == 0:
+            if args.track:
+                payload_stats = sim.get_payload_stats()
+                track_t.append(sim.sim_time[None])
+                track_y.append(float(payload_stats[0, 0]))
+
+            # --- main video ---
             if args.palette == "web":
                 sim.clear_frame_buffer_white()
                 for mat_id, r, g, b in WEB_PALETTE:
                     sim.render_flat_pass(sim.res_sub, sim.grid_side, radius, mat_id, r, g, b)
-            else:  # abyss or random (both use the abyss HDR pipeline)
+            else:
                 sim.clear_frame_buffer()
                 sim.render_frame_abyss(sim.res_sub, sim.grid_side, radius)
-                if use_flow:
-                    sim.render_vorticity_overlay(sim.res_sub, sim.grid_side, 0.002)
                 sim.tone_map_and_encode()
             ti.sync()
+            frames.append((np.clip(sim.frame_buffer.to_numpy(), 0, 1) * 255).astype(np.uint8))
 
-            img = sim.frame_buffer.to_numpy()
-            frames.append((np.clip(img, 0, 1) * 255).astype(np.uint8))
+            # --- white-bg vorticity video (only when --flow) ---
+            if use_flow:
+                sim.compute_vorticity_grid(0.10)
+                sim.render_vorticity_white(sim.res_sub, sim.grid_side, 0.85)
+                ti.sync()
+                frames_vort.append((np.clip(sim.frame_buffer.to_numpy(), 0, 1) * 255).astype(np.uint8))
 
     iio.imwrite(output_path, frames, fps=FPS)
     print(f"Done — {len(frames)} frames written to {output_path}")
+
+    if use_flow:
+        iio.imwrite(vort_path, frames_vort, fps=FPS)
+        print(f"      {len(frames_vort)} vorticity frames written to {vort_path}")
+
+    if args.track and track_t:
+        _save_payload_track(track_t, track_y, label, output_path)
 
 
 if __name__ == "__main__":
