@@ -478,8 +478,12 @@ def evolve(generations, seed=42):
         best_idx = np.argmin(fitness_values)
         best_fitness = -fitness_values[best_idx]
         best_disp = sim_results[best_idx, 2] - sim_results[best_idx, 0]
-        n_invalid = sum(1 for f in fitness_values if f > 0)  # positive = penalty
-        valid_scores = [-f for f in fitness_values if f <= 0]
+        n_invalid = sum(
+            1 for i in range(POPSIZE)
+            if sim_results[i, 4] == 0 or muscle_counts[i] < MUSCLE_FLOOR or batch_stats[i]['self_intersecting']
+        )
+        valid_scores = [-fitness_values[i] for i in range(POPSIZE)
+                        if not (sim_results[i, 4] == 0 or muscle_counts[i] < MUSCLE_FLOOR or batch_stats[i]['self_intersecting'])]
         avg_fitness = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
         n_invalid_total += n_invalid
 
