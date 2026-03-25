@@ -13,6 +13,8 @@ MPM simulation (Taichi), CMA-ES, 2D.
 | 2 | [EXPERIMENT_2.md](EXPERIMENT_2.md) | ✅ Complete (19/50 gens) | Does evolved timing unlock better performance? | 1.179 |
 | 3 | [EXPERIMENT_3.md](EXPERIMENT_3.md) | 🔲 Planned | Raw displacement + frequency as gene | — |
 | 4 | [EXPERIMENT_4.md](EXPERIMENT_4.md) | 🔲 Planned | Does payload shape the morphology attractor? | — |
+| 5 | [EXPERIMENT_5.md](EXPERIMENT_5.md) | 🔲 Planned | Does axisymmetric physics change the optimal morphology? | — |
+| 6 | [EXPERIMENT_6.md](EXPERIMENT_6.md) | 🔲 Planned | Control: new genome + efficiency fitness (Exp 2 replication in tall tank) | — |
 
 ---
 
@@ -23,7 +25,9 @@ MPM simulation (Taichi), CMA-ES, 2D.
 | 1 | 9D | Shape (6) + thickness (3), fixed timing |
 | 2 | 11D | + contraction_frac + refractory_frac |
 | 3 | 11D | relaxation removed → **freq_mult** replaces refractory gene |
-| 4 | 11D | Same as Exp 3 (or Exp 2), `with_payload=False` |
+| 4 | 11D | Same as Exp 3, `with_payload=False` |
+| 5 | 11D | Same as Exp 3, **axisymmetric MPM** (`JELLY_AXISYM=1`) |
+| 6 | 11D | Same as Exp 3 genome, **efficiency fitness** (Exp 2 formula) — control |
 
 ---
 
@@ -60,6 +64,11 @@ MPM simulation (Taichi), CMA-ES, 2D.
 | 2 | `39a3cbe` | Add Exp 2 genome: timing genes, cup bells, activity-weighted fitness |
 | 2 (tall tank support) | `8b74f17` | add evolve compatibility for tall tank |
 | current HEAD | `0d62bd8` | bugfix |
+| 3/4/6 | `7e913d4` | Add --no-payload flag |
+| 3/4/6 | `e65a202` | Add --fitness flag (displacement mode) |
+| 3/4/6 | `74c7b81` | Per-instance frequency field (instance_freq) |
+| 3/4/6 | `3faf72b` | Genome redesign: refractory_frac → freq_mult |
+| 5 | `57d7081` | Axisymmetric MPM toggle (axisym-mpm branch) |
 
 ---
 
