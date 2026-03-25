@@ -184,15 +184,15 @@ PYTHONUNBUFFERED=1 CUDA_VISIBLE_DEVICES=3 JELLY_INSTANCES=32 JELLY_GRID_Y=256 JE
 | t_base | +0.055 | ✅ CV=0.12 | Thinner than Cartesian (0.079) |
 | t_mid | +0.050 | ❌ CV=0.18 | Unlocked |
 | contraction | +0.289 | ❌ CV=0.19 | Unlocked — near default |
-| freq_mult | **+1.143** | ✅ CV=0.15 | Slightly above baseline — opposite to Exp 6 |
+| freq_mult | **not converged** | ❌ CV=high | gen49 best: 0.692; gen33 best: 0.903; wide population variance |
 
 ### Key findings
 
-- **Different attractor from Cartesian**: cp2_y is positive (+0.114) vs Cartesian's negative (−0.19). end_x not pressing upper bound. The axisym physics genuinely changes the optimal bell geometry. This is the experiment's central result.
-- **Not converged at 50 gens**: sigma=0.41, many genes unlocked. The axisym landscape is significantly flatter than Cartesian — more degrees of freedom remain viable. Would benefit from more generations or higher lambda.
-- **freq_mult at 1.14** (slightly above 1 Hz): opposite direction from Exp 6 (0.50 Hz) and opposite from Exp 3 (0.90 Hz). The correct cylindrical pressure recovery may make higher-frequency firing slightly more efficient.
-- **Thinner bell base (t_base=0.055)** vs Cartesian's 0.077-0.079: axisym geometry changes the structural loading on the bell manubrium.
-- **Validation criteria**: no NaN explosions, numerically stable for 50 gens — axisym physics implementation is robust. Formal Cartesian/axisym symmetry test and vortex ring visualisation still pending.
+- **Different attractor from Cartesian**: cp2_y is positive (+0.108 at gen49) vs Cartesian's negative (−0.19). end_x not pressing upper bound (0.294 vs 0.350). end_y at lower bound (−0.300) — very deep bell tips. The axisym physics genuinely changes the optimal bell geometry. This is the experiment's central result.
+- **Not converged at 50 gens**: sigma=0.41 and *increasing* through run (0.272→0.623→0.395). Sigma is still exploring — the axisym landscape is much flatter than Cartesian (cond#=21.2 vs Exp3's 62.9). Would benefit from more generations or higher lambda.
+- **freq_mult timing genes unlocked**: gen33 best shows 0.903, gen49 best shows 0.692; population mean at gen49 = 1.16±0.19 — wide variance, no stable timing attractor yet. Cannot claim direction (above/below baseline) from a single unconverged seed.
+- **Thinner bell** (t_base=0.051, t_mid=0.033) vs Cartesian (t_base=0.079, t_mid=0.067): axisym geometry rewards thinner walls, probably because the annular muscle volume scales with r² — thick walls cost disproportionately more in the axisym metric.
+- **Validation criteria**: no NaN explosions, numerically stable for 50 gens — axisym physics implementation is robust. Vortex ring visualisation pending (use `helpers/view_axisym.py`).
 
 ### Success criteria outcome
 

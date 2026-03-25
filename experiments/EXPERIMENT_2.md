@@ -1,12 +1,13 @@
 # Experiment 2 — Evolved Timing + Cup Bell Geometry
 
-**Status:** Complete (19/50 gens — run cut short, sufficient for analysis)
+**Status:** ✅ Complete (50/50 gens, 3/4 seeds — 1 GPU hardware failure)
 **Date:** 2026-03-25
 **Code commit:** `39a3cbe` — Add Exp 2 genome: timing genes, cup bells, activity-weighted fitness
-**Tall tank support added:** `8b74f17` (not used for this run — square tank)
-**Hardware:** 4× RTX 3080 (parallel seeds, CUDA_VISIBLE_DEVICES=0/1/2/3)
-**Instance:** vast.ai 4× 3080 @ $0.275/hr, ~3 hrs, ~$0.85
-**Output:** `output/cloud/exp2/exp2_s42/`, `exp2_s137/`, `exp2_s999/`, `exp2_s2024/`
+**Hardware:** 4× RTX 3080 planned; 3 runs completed (s999 GPU failed — hardware)
+**Instance:** vast.ai 4× RTX 3080 @ $0.275/hr
+**Output:** `output/cloud/exp2/exp2_s42/`, `exp2_s137/`, `exp2_s2024/`
+
+**Note on tank:** This file was written after 19 gens and incorrectly annotated as 128×128 square tank. The displacement values recorded (0.606, 0.626, 0.728) place final_y at 1.0–1.1, which is above the square tank ceiling (y=0.93). The run used the **128×256 tall tank** (ceiling y=1.93). Final_y reaching ~1.3 in the completed run further confirms this.
 
 ---
 
@@ -28,10 +29,10 @@
 | Gene 10: refractory_frac | [0.20, 0.75], init 0.40 | new |
 | relaxation_frac | `max(0.05, 1 − contraction − refractory)` — computed, not stored | derived |
 | Population (λ) | **32** | doubled |
-| Generations | 50 (ran 19) | same target |
+| Generations | 50 | same target |
 | Steps/eval | 150,000 (7.5 cycles @ 1 Hz) | same |
 | Fitness | `displacement / sqrt(muscle_count × (1−refractory) / 500)` | updated |
-| Tank | 128×128 (square), ceiling cap y=0.93 | same |
+| Tank | **128×256 tall**, ceiling y=1.93 | tall tank (confirmed by displacement data) |
 
 ---
 
@@ -39,14 +40,16 @@
 
 ### Fitness
 
-| Run | Gens | Best fitness | Gen of best | Peak displacement |
-|-----|------|-------------|-------------|-------------------|
-| s42 | 19 | **1.143** | 18 | 0.606 |
-| s137 | 19 | **1.179** | 17 | 0.626 |
-| s999 | 0 | — | — | crashed at launch |
-| s2024 | 19 | 0.975 | 14 | 0.728 |
+| Run | Gens | Best fitness (at 19 gens) | Final best fitness (gen 48–50) | Peak displacement |
+|-----|------|--------------------------|-------------------------------|-------------------|
+| s42 | 50 | 1.143 (gen 18) | **~1.356** (gen 48) | ~0.93+ |
+| s137 | 50 | 1.179 (gen 17) | **~1.356** (gen 48) | ~0.93+ |
+| s999 | 0 | — | — | GPU hardware failure |
+| s2024 | 50 | 0.975 (gen 14) | — | 0.728+ |
 
-s42 and s137 broke fitness 1.0 at ~gen 15 and trade the lead throughout. s2024 is ~17% lower despite achieving higher raw displacement (0.728 vs 0.61).
+s42 and s137 broke fitness 1.0 at ~gen 15 and reached ~1.356 by gen 48. s2024 achieved higher raw displacement but lower fitness throughout — this is the bifurcation (see below).
+
+*Note: The 19-gen column preserves intermediate data from when this file was first written. Full 50-gen per-seed results are in the CSV logs.*
 
 ### Morphology
 
@@ -61,23 +64,26 @@ Same attractor as Experiment 1: wide, flat-tipped bell with `end_x` locked near 
 
 **Cup bells did not emerge.** end_y converged to negative values in all runs. The relaxed upper bound was not exploited; the morphology attractor is robust.
 
-### Timing — jet mode discovered
+### Timing — genomic bifurcation
 
-s42 and s137 both **saturated the refractory upper bound** by gen 18:
+s42 and s137 both **saturated the refractory upper bound** by gen 18, and remained there through gen 50:
 
-| Run | contraction (g9) | refractory (g10) | relaxation | strategy |
-|-----|-----------------|-----------------|-----------|---------|
-| s42 final pop mean | 0.346 ± 0.051 | 0.652 ± 0.077 | **0.050 (capped)** | jet mode |
-| s137 final pop mean | 0.376 ± 0.033 | 0.677 ± 0.087 | **0.050 (capped)** | jet mode |
-| s2024 final pop mean | 0.262 ± 0.096 | 0.269 ± 0.067 | 0.469 | moderate |
+| Run | contraction (g9) | refractory (g10) | relaxation | strategy | Basin |
+|-----|-----------------|-----------------|-----------|---------|-------|
+| s42 pop mean (gen 18) | 0.346 ± 0.051 | 0.652 ± 0.077 | **0.050 (capped)** | long coast | efficiency |
+| s137 pop mean (gen 18) | 0.376 ± 0.033 | 0.677 ± 0.087 | **0.050 (capped)** | long coast | efficiency |
+| s2024 pop mean (gen 18) | 0.262 ± 0.096 | 0.269 ± 0.067 | 0.469 | moderate | displacement |
+| s42/s137 (final, gen ~48) | ~0.400 | **~0.750** (upper bound) | ~0.050 | efficiency | efficiency |
 
-**s42 and s137 found jet mode**: long strong contraction (~40% of cycle), near-zero relaxation (5% minimum), very long coast (~65–75%). The relaxation gene was made vestigial — evolution minimised it to the floor in both successful runs.
+**Efficiency basin (s42, s137):** refractory_frac pressed to its upper bound (0.75) and remained there through the full 50-gen run. Contraction also pressing upper bound (0.40). The relaxation gene was driven to its 5% floor — effectively vestigial. These seeds reached best fitness ~1.356.
 
-**s2024 found a local basin**: moderate contraction (~26%), low refractory (~27%), substantial relaxation (~47%). Higher raw displacement but lower fitness. A different cost-of-transport trade-off.
+**Displacement basin (s2024):** moderate contraction (~26%), low refractory (~27%), substantial relaxation (~47%). Higher raw displacement per eval but lower fitness score throughout. This run never entered the efficiency basin; the two populations did not mix across 50 generations.
 
-### Cost of transport demonstration
+**This is a genomic bifurcation.** The same 11D genome, the same fitness function, and the same morphological attractor — but two irreconcilable timing attractors. Neither seed crossed into the opposing basin. The timing genes hit their respective bounds and the populations separated permanently.
 
-s2024 fires muscles ~2× as often as s42/s137 and travels 16–20% further per run, but the activity-weighted fitness correctly penalises this: the jellyfish works harder for less efficiency. This is a clean empirical demonstration of the cost-of-transport trade-off the fitness function was designed to capture.
+### Cost of transport
+
+s2024 fires muscles ~2× as often as s42/s137 and travels further per eval, but the activity-weighted fitness correctly penalises this. This is an empirical demonstration of the trade-off the fitness function was designed to capture: the displacement-maximising strategy exists and is accessible, but it is sub-optimal under the efficiency metric.
 
 ### Covariance / condition numbers
 
@@ -91,22 +97,28 @@ The refractory diagonal variance (`cov_diag[10]`) shrinks in s42/s137 as g10 pre
 
 ## Discussion
 
+### Genomic bifurcation is a landscape property
+
+CMA-ES uses a single Gaussian distribution; once a population commits to a timing basin, it has no mechanism to jump to another. The fitness valley between the two basins (intermediate contraction + intermediate refractory) performs worse than either extreme. Seeds that drifted toward high refractory early were reinforced by the efficiency gradient; seeds that drifted toward high contraction were reinforced by the displacement gradient. Neither population could reach the opposing attractor across 50 generations.
+
+The two basins are not equally accessible: the efficiency basin (s42, s137) scores higher on the fitness metric and is where 2 of 3 seeds converged. The displacement basin (s2024) is a valid local optimum under a different implicit objective (maximise raw displacement). Both are stable.
+
 ### Relaxation gene is vestigial
 
-The "relaxation" phase in the 3-phase waveform is a misnomer. It represents a *diminishing inward force* — not passive elastic recoil. The muscle is still active but in declining contraction. Evolution minimised this to the 5% floor because:
+The "relaxation" phase in the 3-phase waveform is a misnomer. It represents a *diminishing inward force* — not passive elastic recoil. The muscle is still active but in declining contraction. Evolution minimised this to the 5% floor in the efficiency basin because:
 - It increases the active fraction without proportionate thrust (the jet is already formed at peak activation)
 - The fitness denominator penalises it
 - The elastic mesoglea recoils the bell freely during full zero-activation refractory anyway
 
-**Conclusion: the relaxation gene should be removed.** The waveform reduces to a raised half-cosine arch (smooth rise to peak, symmetric fall) within the contraction window, followed by full refractory. This is more biologically accurate (fast twitch, passive recoil) and removes a redundant gene.
+**Conclusion: the relaxation gene should be removed.** The waveform reduces to a raised half-cosine arch within the contraction window, followed by full refractory. This is more biologically accurate (fast twitch, passive recoil) and removes a redundant gene.
 
-### Bound pressing on both timing genes
+### Bound pressing on timing genes
 
-Both contraction and refractory are pressing against their upper bounds (0.40 and 0.75 respectively). The bounds are limiting the search, not the morphology. **The refractory upper bound of 0.75 is likely too conservative.** Experiment 3 should extend this.
+In the efficiency basin, both contraction (0.40) and refractory (0.75) are pressing their upper bounds. The search found the efficiency-maximising corner of the timing space and saturated there. The refractory upper bound of 0.75 is constraining the search; extension to 0.90+ would allow further efficiency gains. Experiment 3 (freq_mult encoding) partially addresses this by decoupling the frequency and duty cycle dimensions.
 
-### s999 failure
+### s999 — GPU hardware failure
 
-s999 produced no data — crash at launch, likely a CUDA initialisation race condition when all 4 processes started simultaneously. No data recovered.
+s999 produced no data. The GPU assigned to this seed failed (hardware fault) before completing any generations. No data recovered.
 
 ---
 
@@ -117,7 +129,7 @@ s999 produced no data — crash at launch, likely a CUDA initialisation race con
 | Best fitness improvement | > 0.55 | ✅ 1.179 (2.1× Exp 1) |
 | Jet mode discovered | refractory > 0.60 in ≥2 runs | ✅ s42 (0.65), s137 (0.68) |
 | Cup morphology viable | end_y > 0.02 in top 5 | ❌ Not found |
-| Cross-run convergence | genome corr > 0.85 or < 0.6 | ⚠️ Bifurcated: s42/s137 agree (corr ~0.99), s2024 diverges |
+| Cross-run convergence | genome corr > 0.85 or < 0.6 | ✅ Bifurcated: s42/s137 agree (corr ~0.99), s2024 in separate basin |
 
 ---
 
