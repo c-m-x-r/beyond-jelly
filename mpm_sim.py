@@ -120,6 +120,10 @@ instance_actuation = ti.field(dtype=float, shape=(n_instances,))
 instance_act_contraction = ti.field(dtype=float, shape=(n_instances,))
 instance_act_refractory  = ti.field(dtype=float, shape=(n_instances,))
 
+# Per-instance frequency multiplier (gene 10 in Experiment 3+; default 1.0 = no change)
+# Scales actuation frequency relative to the global actuation_freq constant.
+instance_freq = ti.field(dtype=float, shape=(n_instances,))
+
 # Per-instance rendering hue (default 0.55 = blue-cyan, matching original look)
 instance_hue = ti.field(dtype=float, shape=(n_instances,))
 # Per-instance muscle hue (default offset by 0.15 from jelly hue for contrast)
@@ -135,6 +139,7 @@ for _i in range(n_instances):
     instance_payload_density[_i] = 2.5
     instance_act_contraction[_i] = ACT_CONTRACTION_END        # 0.20
     instance_act_refractory[_i]  = 1.0 - ACT_RELAXATION_END  # 0.40
+    instance_freq[_i] = 1.0
 
 # --- PHYSICS KERNELS ---
 
@@ -143,8 +148,6 @@ def substep():
     """Main Physics Step (P2G -> Grid -> G2P)."""
     # 0. Update Time & Pulse
     current_time = sim_time[None]
-    period = 1.0 / actuation_freq
-    phase = (current_time % period) / period
 
     # 1. Reset Grid
     for m, i, j in grid_m:
@@ -154,6 +157,11 @@ def substep():
     # 2. P2G
     for m, p in x:
         if material[m, p] < 0: continue
+
+        # Per-instance phase: frequency multiplied per-instance so each jellyfish
+        # can oscillate at a different rate (gene 10 in Exp 3+).
+        inst_period = 1.0 / (actuation_freq * instance_freq[m])
+        phase = (current_time % inst_period) / inst_period
 
         # Per-instance raised-cosine activation
         c_end   = instance_act_contraction[m]
@@ -336,9 +344,8 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
     """
     'Deep Sea Abyss' Renderer with Grid-Based Light Blue Gradient.
     """
-    # Re-calculate phase for visual sync (activation computed per-instance below)
-    period = 1.0 / actuation_freq
-    phase = (sim_time[None] % period) / period
+    # Re-calculate phase for visual sync (per-instance to match substep())
+    current_time_r = sim_time[None]
 
     grid_norm_factor = float(p_grid_side - 1) if p_grid_side > 1 else 1.0
 
@@ -348,6 +355,8 @@ def render_frame_abyss(p_res_sub: int, p_grid_side: int, radius: float):
         if mat < 0 or pos[0] < 0: continue
 
         # Per-instance activation for muscle colour sync
+        inst_period_r = 1.0 / (actuation_freq * instance_freq[m])
+        phase = (current_time_r % inst_period_r) / inst_period_r
         c_end_r    = instance_act_contraction[m]
         ref_frac_r = instance_act_refractory[m]
         relax_dur_r = ti.max(0.05, 1.0 - c_end_r - ref_frac_r)
