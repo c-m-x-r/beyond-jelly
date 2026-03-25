@@ -36,7 +36,8 @@ if _pre_args.tall:
     os.environ.setdefault('JELLY_DOMAIN_H',  '2.0')
 
 _TALL = _pre_args.tall
-_NO_PAYLOAD = False  # set in main(); no effect on GPU allocation
+_NO_PAYLOAD = False    # set in main(); no effect on GPU allocation
+_FITNESS_MODE = 'efficiency'  # set in main(); 'efficiency' | 'displacement'
 
 import taichi as ti
 import mpm_sim as sim
@@ -100,19 +101,22 @@ def compute_fitness(sim_results, muscle_counts, genomes=None):
         # Cap near ceiling so bouncing doesn't inflate score
         displacement = min(final_y, sim.domain_height - 0.07) - init_y
 
-        # Effective muscle cost: penalise both particle count and active fraction.
-        # active_frac = 1 - refractory_frac (fraction of cycle with muscle firing).
-        # A jellyfish that rests more uses less total muscle energy per cycle.
-        # integral of raised-cosine over one active phase = 0.5 × active_duration,
-        # so effective_cost ∝ muscle_count × (1 - refractory_frac).
-        if genomes is not None and len(genomes[i]) > 10:
-            refractory_frac = float(np.clip(genomes[i][10], 0.20, 0.75))
+        if _FITNESS_MODE == 'displacement':
+            raw.append(-displacement)  # CMA-ES minimises; negate for maximisation
         else:
-            refractory_frac = 0.40   # legacy default
-        active_frac = 1.0 - refractory_frac
-        effective_muscle = muscle_counts[i] * active_frac
-        muscle_cost = (effective_muscle / MUSCLE_REFERENCE) ** 0.5
-        raw.append(-displacement / muscle_cost)  # CMA-ES minimises
+            # Effective muscle cost: penalise both particle count and active fraction.
+            # active_frac = 1 - refractory_frac (fraction of cycle with muscle firing).
+            # A jellyfish that rests more uses less total muscle energy per cycle.
+            # integral of raised-cosine over one active phase = 0.5 × active_duration,
+            # so effective_cost ∝ muscle_count × (1 - refractory_frac).
+            if genomes is not None and len(genomes[i]) > 10:
+                refractory_frac = float(np.clip(genomes[i][10], 0.20, 0.75))
+            else:
+                refractory_frac = 0.40   # legacy default
+            active_frac = 1.0 - refractory_frac
+            effective_muscle = muscle_counts[i] * active_frac
+            muscle_cost = (effective_muscle / MUSCLE_REFERENCE) ** 0.5
+            raw.append(-displacement / muscle_cost)  # CMA-ES minimises
 
     # Set penalty to just worse than the worst valid individual this generation.
     # Avoids a massive magnitude gap that distorts CMA-ES covariance updates.
@@ -772,10 +776,14 @@ def main():
                         help="Use 128x256 tall tank (160K particles, domain_height=2.0) to remove ceiling exploit")
     parser.add_argument('--no-payload', action='store_true',
                         help="Disable payload (Experiment 4: evolve morphology without payload cargo)")
+    parser.add_argument('--fitness', choices=['efficiency', 'displacement'], default='efficiency',
+                        help="Fitness function: 'efficiency' (default) or 'displacement' (raw vertical rise). "
+                             "WARNING: resuming an efficiency checkpoint with --fitness displacement is mismatched.")
     args = parser.parse_args()
 
-    global OUTPUT_DIR, _NO_PAYLOAD
+    global OUTPUT_DIR, _NO_PAYLOAD, _FITNESS_MODE
     _NO_PAYLOAD = args.no_payload
+    _FITNESS_MODE = args.fitness
     run_id = args.run_id or datetime.now().strftime('%Y%m%d_%H%M%S')
     OUTPUT_DIR = os.path.join('output', run_id)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
