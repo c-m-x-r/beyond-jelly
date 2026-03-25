@@ -195,6 +195,10 @@ def main():
 
     for i in range(sim.n_instances):
         sim.load_particles(i, pos, mat, fiber)
+        if len(genome) > 9:
+            sim.instance_act_contraction[i] = float(np.clip(genome[9],  0.05, 0.60))
+        if len(genome) > 10:
+            sim.instance_freq[i] = float(np.clip(genome[10], 0.5, 2.0))
     ti.sync()
 
     # Configure per-instance colours

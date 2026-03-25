@@ -752,6 +752,15 @@ def compute_payload_stats():
             ti.atomic_add(fitness_buffer[i, 1], 1.0)          # Count
             ti.atomic_add(fitness_buffer[i, 2], x[i, p][0])  # Sum X
 
+@ti.kernel
+def compute_body_stats():
+    """Accumulate jelly+muscle (Material 1+3) CoM — used in no-payload mode."""
+    for i, p in x:
+        if material[i, p] == 1 or material[i, p] == 3:
+            ti.atomic_add(fitness_buffer[i, 0], x[i, p][1])
+            ti.atomic_add(fitness_buffer[i, 1], 1.0)
+            ti.atomic_add(fitness_buffer[i, 2], x[i, p][0])
+
 def get_payload_stats():
     """Compute payload center of mass. Returns (n_instances, 3) array: [com_y, com_x, count]."""
     clear_fitness_buffer()
@@ -767,22 +776,46 @@ def get_payload_stats():
             stats[i, 2] = count
     return stats
 
+def _get_stats_any():
+    """Get CoM stats: payload if present, else jelly+muscle body (no-payload mode)."""
+    clear_fitness_buffer()
+    compute_payload_stats()
+    ti.sync()
+    raw = fitness_buffer.to_numpy()
+    # Detect no-payload instances (count==0) and fall back to body CoM
+    no_payload = raw[:, 1] == 0
+    if no_payload.any():
+        clear_fitness_buffer()
+        compute_body_stats()
+        ti.sync()
+        body_raw = fitness_buffer.to_numpy()
+        raw[no_payload] = body_raw[no_payload]
+    stats = np.zeros((n_instances, 3))
+    for i in range(n_instances):
+        count = raw[i, 1]
+        if count > 0:
+            stats[i, 0] = raw[i, 0] / count  # CoM Y
+            stats[i, 1] = raw[i, 2] / count  # CoM X
+            stats[i, 2] = count
+    return stats
+
 def run_batch_headless(steps):
     """
     Run simulation headlessly for all instances.
     Returns (n_instances, 5): [init_y, init_x, final_y, final_x, valid]
+    No-payload mode: tracks jelly+muscle body CoM instead of payload CoM.
     """
     sim_time[None] = 0.0
 
-    # Capture initial payload positions
-    initial = get_payload_stats()
+    # Capture initial positions (payload if present, else body CoM)
+    initial = _get_stats_any()
 
     # Run physics
     for _ in range(steps):
         substep()
 
-    # Capture final payload positions
-    final = get_payload_stats()
+    # Capture final positions
+    final = _get_stats_any()
 
     # Assemble results
     results = np.zeros((n_instances, 5))
@@ -792,12 +825,11 @@ def run_batch_headless(steps):
             results[i, 1] = initial[i, 1]  # init CoM X
             results[i, 2] = final[i, 0]    # final CoM Y
             results[i, 3] = final[i, 1]    # final CoM X
-            # Only invalidate if payload sinks to floor (genuine failure)
+            # In no-payload mode the body CoM y is never near 0 (bell starts at 0.40+),
+            # so the 0.01 floor check remains a safe validity gate for both modes.
             if final[i, 0] < 0.01:
-                results[i, 4] = 0.0  # Invalid: payload lost to floor
+                results[i, 4] = 0.0  # Invalid: body/payload lost to floor
             else:
                 results[i, 4] = 1.0  # Valid
-        else:
-            results[i, 4] = 0.0  # Invalid: payload lost
     return results
 
