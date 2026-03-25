@@ -197,6 +197,7 @@ cd web && python app.py   # http://localhost:5000
 | helpers/make_cad.py | Genome → STL (extruded + revolved) |
 | helpers/make_comparison.py | Side-by-side comparison video |
 | helpers/tune_actuation.py | Actuation strength sweep across GPU batch |
+| helpers/tall_tank.py | Render genome in 128×256 tall tank (2-unit domain, 160K particles, 512×1024 video) |
 | web/ | Flask web viewer: genome sliders, history, Bezier editor, /custom designer |
 | setup_cloud.sh | Bootstrap cloud instance (uv, deps, X11 libs, GPU smoke test) |
 | deploy.sh | Full pipeline: rsync + setup + launch experiments |
@@ -220,12 +221,13 @@ All outputs in `output/<run-id>/` (or `output/` for default runs):
 
 ## Performance
 
-| Hardware | λ | Steps/eval | Time/gen | 50-gen total |
-|----------|---|------------|----------|--------------|
-| RTX 4090 | 16 | 60K | ~74s | ~62 min |
-| RTX 4090 | 16 | 150K | ~112s | ~93 min |
-| RTX 3080 | 32 | 150K | ~212s | ~177 min |
-| 4× RTX 3080 | 32 each | 150K | ~212s | ~177 min (all 4 parallel) |
+| Hardware | λ | Tank | Steps/eval | Time/gen | 50-gen total |
+|----------|---|------|------------|----------|--------------|
+| RTX 4090 | 16 | 128×128 | 60K | ~74s | ~62 min |
+| RTX 4090 | 16 | 128×128 | 150K | ~112s | ~93 min |
+| RTX 3080 | 32 | 128×128 | 150K | ~212s | ~177 min |
+| RTX 3080 | 32 | **128×256** (tall) | 150K | **~480s** | **~6.7 hrs** |
+| 4× RTX 3080 | 32 each | 128×256 (tall) | 150K | ~480s | ~6.7 hrs (all 4 parallel, ~$7.40) |
 
 GPU is SM-compute bound (~100% SM, ~6% VRAM at λ=16). Two processes on same GPU time-slice — use `CUDA_VISIBLE_DEVICES` to assign one process per GPU.
 
@@ -233,7 +235,7 @@ GPU is SM-compute bound (~100% SM, ~6% VRAM at λ=16). Two processes on same GPU
 
 1. **No buoyancy model**: payload sinks ~0.09 units/3-cycle run; jellyfish must overcome this plus generate net upward thrust
 2. **Mirror overlap**: particles at x=0 duplicated by symmetry mirroring (density spike at midline)
-3. **Ceiling exploit**: population saturates at y≈0.88 within ~10 gens; activity-weighted fitness partially addresses this by pivoting to efficiency
+3. **Ceiling exploit (square tank only)**: population saturates at y≈0.88 within ~10 gens in 128×128; use `--tall` for 128×256 domain (ceiling at y=1.93) to remove this
 4. **Undissipated wake**: 35% residual momentum at refractory end (Exp 1); evolved timing (Exp 2) should reduce this
 5. **No adaptive resolution**: 128→256 grid phase transition not implemented
 6. **Drift penalty disabled**: `- 1.0 * drift` commented out in `compute_fitness()`

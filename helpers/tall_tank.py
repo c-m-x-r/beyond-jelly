@@ -33,15 +33,13 @@ import imageio.v3 as iio
 
 import mpm_sim as sim
 from mpm_sim import WEB_PALETTE
-from make_jelly import fill_tank, AURELIA_GENOME
+from make_jelly import fill_tank, AURELIA_GENOME, DEFAULT_SPAWN
 
 OUTPUT_DIR = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "output")
 
 DOMAIN_HEIGHT = 2.0
 RENDER_EVERY  = 500       # substeps between frames
 FPS           = 30
-# Spawn slightly higher than default so jellyfish sits in the lower third of the tall tank
-TALL_SPAWN    = np.array([0.5, 0.30])
 
 
 def load_genome(args):
@@ -105,24 +103,25 @@ def main():
 
     # Build particle set with double-height water fill
     print(f"Building particle set for tall tank (domain 1×{DOMAIN_HEIGHT})...")
-    pos, mat, fiber, self_intersecting = fill_tank(
+    pos, mat, fiber, stats = fill_tank(
         genome,
         max_particles=sim.n_particles,
         grid_res=128,
-        spawn_offset=TALL_SPAWN,
+        spawn_offset=DEFAULT_SPAWN,
         domain_height=DOMAIN_HEIGHT,
     )
-    if self_intersecting:
+    if stats['self_intersecting']:
         print("WARNING: morphology is self-intersecting")
-
-    n_robot  = int(np.sum(mat >= 0) - np.sum(mat == 0))
-    n_water  = int(np.sum(mat == 0))
-    n_muscle = int(np.sum(mat == 3))
-    print(f"  {n_robot} robot particles  |  {n_water} water particles  |  {sim.n_particles} total slots")
-    print(f"  {n_muscle} muscle particles")
+    print(f"  {stats['n_robot']} robot  |  {stats['n_water']} water  |  {stats['muscle_count']} muscle  |  {sim.n_particles} total slots")
 
     sim.sim_time[None] = 0.0
     sim.load_particles(0, pos, mat, fiber)
+
+    # Apply timing genes if present (genes 9 and 10)
+    if len(genome) > 9:
+        sim.instance_act_contraction[0] = float(np.clip(genome[9],  0.05, 0.40))
+    if len(genome) > 10:
+        sim.instance_act_refractory[0]  = float(np.clip(genome[10], 0.20, 0.75))
 
     # Simulation parameters
     steps_per_cycle = int(round(1.0 / (sim.actuation_freq * sim.dt)))
@@ -148,8 +147,8 @@ def main():
     print(f"\nSaved → {out_path}  ({len(frames)} frames, {sim.video_res//2}×{sim.video_res} px)")
 
     # Final CoM stats
-    stats = sim.get_payload_stats()
-    print(f"Final payload CoM y = {stats[0,0]:.4f}  (started at ~{TALL_SPAWN[1]:.2f})")
+    payload_stats = sim.get_payload_stats()
+    print(f"Final payload CoM y = {payload_stats[0,0]:.4f}  (started at ~{DEFAULT_SPAWN[1]:.2f})")
 
 
 if __name__ == "__main__":

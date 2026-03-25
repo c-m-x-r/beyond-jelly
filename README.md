@@ -73,7 +73,8 @@ jellyfih/
 │   ├── fluid_test.py       # Oscillating paddle fluid test
 │   ├── make_cad.py         # Genome → STL (extruded + revolved)
 │   ├── make_comparison.py  # Side-by-side comparison video
-│   └── tune_actuation.py   # Actuation strength sweep
+│   ├── tune_actuation.py   # Actuation strength sweep
+│   └── tall_tank.py        # Render in 128×256 tall tank (2-unit domain, 512×1024 video)
 ├── web/                    # Flask web viewer + interactive designer
 ├── setup_cloud.sh          # Cloud instance bootstrap
 ├── deploy.sh               # Full rsync + setup + launch pipeline
@@ -164,10 +165,11 @@ cd web && python app.py   # http://localhost:5000
 
 ## Performance
 
-| Hardware | λ | Steps/eval | Time/gen | Cost for 4 seeds × 50 gens |
-|----------|---|------------|----------|-----------------------------|
-| RTX 4090 | 16 | 150K | ~112s | ~3.1 hrs sequential, ~$0.93 |
-| 4× RTX 3080 | 32 each | 150K | ~212s | ~3 hrs parallel, ~$0.85 |
+| Hardware | λ | Tank | Steps/eval | Time/gen | Cost for 4 seeds × 50 gens |
+|----------|---|------|------------|----------|-----------------------------|
+| RTX 4090 | 16 | 128×128 | 150K | ~112s | ~3.1 hrs sequential, ~$0.93 |
+| 4× RTX 3080 | 32 each | 128×128 | 150K | ~212s | ~3 hrs parallel, ~$0.85 |
+| 4× RTX 3080 | 32 each | **128×256** (Exp 2) | 150K | ~480s | ~6.7 hrs parallel, ~$7.40 |
 
 GPU is SM-compute bound at λ=16–32 (~6% VRAM). Use `CUDA_VISIBLE_DEVICES=N` to pin one process per GPU on multi-GPU machines.
 
@@ -212,6 +214,7 @@ done
 - [x] CMA-ES with checkpoint/resume, full CSV/JSON/diagnostics logging
 - [x] HDR abyss renderer + web palette + vorticity overlay
 - [x] view_single / view_generation / view_random / fluid_analysis helpers
+- [x] **Tall tank** (`--tall`): 128×256 grid, 160K particles, 2-unit domain — removes ceiling exploit
 - [x] Cloud deployment scripts (deploy.sh, sync_results.sh, setup_cloud.sh)
 - [x] Multi-GPU parallel runs via CUDA_VISIBLE_DEVICES
 - [x] Fluid dynamics analysis tool (grid momentum, vorticity, wall flux)
@@ -222,7 +225,7 @@ done
 - 2D only — overestimates thrust vs 3D jellyfish
 - Speed of sound 7× slower than real water
 - Drift penalty disabled (lateral stability not penalized)
-- Ceiling exploit: population saturates at y≈0.88 within ~10 gens
+- Ceiling exploit in square tank — use `--tall` flag (128×256) to remove it
 
 ### Next (Experiment 3 candidates)
 - Frequency as an evolved gene [0.3, 3.0 Hz]
