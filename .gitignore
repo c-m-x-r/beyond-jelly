@@ -15,6 +15,9 @@ output/
 *.txt
 *.pkl
 *.csv
+*.conf
+*.service
+
 
 <<<<<<< Updated upstream
 #documentation files
