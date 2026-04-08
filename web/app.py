@@ -4,7 +4,11 @@ Flask backend for jellyfish morphology visualization.
 """
 
 from flask import Flask, render_template, jsonify, request, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 import math
+import colorsys
+import os
+import random as _random
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -26,6 +30,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from make_jelly import fill_tank, random_genome, AURELIA_GENOME
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+app.config['APPLICATION_ROOT'] = os.environ.get('APP_ROOT', '/')
+
+NO_GPU = os.environ.get('NO_GPU', '').lower() in ('1', 'true')
 
 # Constants
 N_PARTICLES = 80000
@@ -44,13 +52,35 @@ GENOME_LOWER = [0.0, -0.15, 0.0, -0.2, 0.05, -0.30, 0.025, 0.025, 0.01, 0.05, 0.
 GENOME_UPPER = [0.25, 0.15, 0.3, 0.15, 0.35, +0.10, 0.08, 0.1,  0.04, 0.40, 0.75]
 GENOME_DEFAULT = [(lo + hi) / 2 for lo, hi in zip(GENOME_LOWER, GENOME_UPPER)]
 
-# Material colors (minimalist palette)
+# Material colors — attractor colors (zero variance target)
 MATERIAL_COLORS = {
-    0: '#E8F4F8',  # Water: very light blue-gray
-    1: '#4ECDC4',  # Jelly: teal
+    0: '#F5FBFD',  # Water: light grey background
+    1: '#4ECDC4',  # Jelly: teal   (HSL ~174°, 56%, 55%)
     2: '#FFA500',  # Payload: orange
-    3: '#FF6B6B',  # Muscle: coral
+    3: '#FF6B6B',  # Muscle: coral  (HSL ~0°, 100%, 71%)
 }
+
+# Attractor hues (H degrees, S, L) — where colors converge at variance=0
+_JELLY_ATTRACTOR  = (174.0, 0.56, 0.55)
+_MUSCLE_ATTRACTOR = (  0.0, 1.00, 0.71)
+
+
+def _hsl_hex(h, s, l):
+    """Convert HSL (h in degrees) to a #rrggbb hex string."""
+    r, g, b = colorsys.hls_to_rgb(h / 360.0, l, s)
+    return f'#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}'
+
+
+def _variance_colors(variance):
+    """Return (jelly_hex, muscle_hex) with hue jitter scaled by variance (0=attractor, 1=full chaos).
+    variance=1 → jitter_std=180° (uniform hue spread); variance=0 → exact attractor color."""
+    jitter_std = variance * 180.0
+    jelly_hue  = (_JELLY_ATTRACTOR[0]  + _random.gauss(0, jitter_std)) % 360
+    muscle_hue = (_MUSCLE_ATTRACTOR[0] + _random.gauss(0, jitter_std)) % 360
+    return (
+        _hsl_hex(jelly_hue,  _JELLY_ATTRACTOR[1],  _JELLY_ATTRACTOR[2]),
+        _hsl_hex(muscle_hue, _MUSCLE_ATTRACTOR[1], _MUSCLE_ATTRACTOR[2]),
+    )
 
 
 def render_morphology(genome, size=(6, 8), colors=None):
@@ -62,22 +92,24 @@ def render_morphology(genome, size=(6, 8), colors=None):
         if colors:
             mat_colors.update(colors)
 
+        bg = mat_colors[0]
+
         # Generate phenotype
         pos, mat, _, stats = fill_tank(genome_arr, N_PARTICLES, grid_res=GRID_RES)
 
-        # Create figure with transparent background
-        fig, ax = plt.subplots(figsize=size, facecolor='none')
-        ax.set_facecolor('#FAFAFA')
+        # Figure and axes both use the same bg so letterbox margins are invisible
+        fig, ax = plt.subplots(figsize=size, facecolor=bg)
+        ax.set_facecolor(bg)
 
-        # Plot particles by material type
-        for mat_id in [0, 1, 3, 2]:  # Water, jelly, muscle, payload (payload on top)
+        # Plot non-water particles: jelly, muscle, payload (payload on top)
+        for mat_id in [1, 3, 2]:
             mask = mat == mat_id
             if np.any(mask):
                 ax.scatter(
                     pos[mask, 0], pos[mask, 1],
                     c=mat_colors[mat_id],
                     s=1.0,
-                    alpha=0.8 if mat_id == 0 else 1.0,
+                    alpha=1.0,
                     edgecolors='none',
                     rasterized=True
                 )
@@ -88,11 +120,11 @@ def render_morphology(genome, size=(6, 8), colors=None):
         ax.set_aspect('equal')
         ax.axis('off')
 
-        # Save to bytes
+        # Save to bytes — facecolor must match bg so margins stay consistent
         buf = io.BytesIO()
         plt.tight_layout(pad=0)
         plt.savefig(buf, format='png', dpi=100, bbox_inches='tight',
-                    pad_inches=0, facecolor='none', transparent=False)
+                    pad_inches=0, facecolor=bg)
         plt.close(fig)
 
         buf.seek(0)
@@ -139,6 +171,12 @@ def api_aurelia():
 def api_default():
     """Get the default genome."""
     return jsonify({'genome': GENOME_DEFAULT})
+
+
+@app.route('/api/config', methods=['GET'])
+def api_config():
+    """Return server-side feature flags."""
+    return jsonify({'no_gpu': NO_GPU})
 
 
 @app.route('/api/bounds', methods=['GET'])
@@ -248,16 +286,19 @@ def api_render_grid():
     """Render morphologies in an auto-sized grid (up to 64 individuals)."""
     data = request.get_json()
     individuals = data.get('individuals', [])
+    use_random_colors = data.get('random_colors', False)
+    color_variance = float(data.get('color_variance', 0.5))
 
     if not individuals or len(individuals) > 64:
         return jsonify({'error': 'Provide 1-64 individuals'})
 
     n = len(individuals)
-    cols = min(8, math.ceil(math.sqrt(n)))
+    cols = 4
     rows = (n + cols - 1) // cols
+    bg = MATERIAL_COLORS[0]
 
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 5),
-                             facecolor='#FAFAFA')
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 5, rows * 5),
+                             facecolor=bg)
     if rows == 1 and cols == 1:
         axes = np.array([[axes]])
     elif rows == 1:
@@ -277,13 +318,20 @@ def api_render_grid():
                     np.array(genome, dtype=np.float64),
                     N_PARTICLES, grid_res=GRID_RES)
 
-                for mat_id in [0, 1, 3, 2]:
+                cell_colors = dict(MATERIAL_COLORS)
+                if use_random_colors:
+                    jelly_hex, muscle_hex = _variance_colors(color_variance)
+                    cell_colors[1] = jelly_hex
+                    cell_colors[3] = muscle_hex
+
+                ax.set_facecolor(cell_colors[0])  # axes bg matches water bg
+                for mat_id in [1, 3, 2]:
                     mask = mat == mat_id
                     if np.any(mask):
                         ax.scatter(
                             pos[mask, 0], pos[mask, 1],
-                            c=MATERIAL_COLORS[mat_id],
-                            s=0.5, alpha=0.8 if mat_id == 0 else 1.0,
+                            c=cell_colors[mat_id],
+                            s=0.5, alpha=1.0,
                             edgecolors='none', rasterized=True)
 
                 ax.set_xlim(0, 1)
@@ -294,18 +342,19 @@ def api_render_grid():
                 fitness = ind.get('fitness', None)
                 if fitness is not None:
                     label += f"  f={fitness:.3f}"
-                ax.set_title(label, fontsize=10, fontfamily='monospace',
-                             color='#1A1A1A', pad=4)
+                ax.set_title(label, fontsize=30, fontfamily='monospace',
+                             color='#B30000', pad=6)
             except Exception:
                 ax.text(0.5, 0.5, 'Error', ha='center', va='center',
                         color='#FF6B6B', fontsize=12)
 
+        ax.set_facecolor(bg)  # empty cells use same bg
         ax.axis('off')
 
     plt.tight_layout(pad=1)
     buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=80, bbox_inches='tight',
-                facecolor='#FAFAFA')
+    plt.savefig(buf, format='png', dpi=100, bbox_inches='tight',
+                facecolor=bg)
     plt.close(fig)
 
     buf.seek(0)
@@ -494,7 +543,7 @@ def api_custom_submit():
         return jsonify({'error': 'Name is required'}), 400
 
     genome = data.get('genome')
-    if not genome or len(genome) != 9:
+    if not genome or len(genome) != len(GENOME_LOWER):
         return jsonify({'error': 'Invalid genome'}), 400
     for i, v in enumerate(genome):
         if v < GENOME_LOWER[i] or v > GENOME_UPPER[i]:
@@ -578,5 +627,5 @@ def api_custom_thumbnail(submission_id):
 
 
 if __name__ == '__main__':
-    # Run on all interfaces to allow Termux access
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)

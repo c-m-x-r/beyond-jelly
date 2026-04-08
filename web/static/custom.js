@@ -21,7 +21,7 @@ let muscleColor = '#FF6B6B';
 // === Init ===
 
 async function init() {
-    const resp = await fetch('/api/bounds');
+    const resp = await fetch(API_BASE + '/api/bounds');
     bounds = await resp.json();
     customGenome = [...bounds.default];
 
@@ -150,7 +150,7 @@ function applyColors(jelly, muscle) {
 // === Randomize: genome + colors ===
 
 async function randomize() {
-    const data = await (await fetch('/api/random')).json();
+    const data = await (await fetch(API_BASE + '/api/random')).json();
     customGenome = data.genome;
     // Pick two hues separated by 90–180° for contrast
     const jellyHex = randomVibrantHex();
@@ -173,7 +173,7 @@ async function renderMorphology() {
     img.classList.remove('loaded');
 
     try {
-        const resp = await fetch('/api/custom/render', {
+        const resp = await fetch(API_BASE + '/api/custom/render', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ genome: customGenome, jelly_color: jellyColor, muscle_color: muscleColor }),
@@ -207,7 +207,7 @@ async function loadAquarium() {
     const grid = document.getElementById('aquarium-grid');
     const countEl = document.getElementById('aquarium-count');
     try {
-        const data = await (await fetch('/api/custom/aquarium')).json();
+        const data = await (await fetch(API_BASE + '/api/custom/aquarium')).json();
         const subs = data.submissions;
 
         grid.innerHTML = '';
@@ -226,7 +226,7 @@ async function loadAquarium() {
             fig.className = 'aquarium-item';
 
             const img = document.createElement('img');
-            img.src = `/api/custom/thumbnail/${sub.id}`;
+            img.src = `${API_BASE}/api/custom/thumbnail/${sub.id}`;
             img.alt = sub.name;
             img.loading = 'lazy';
 
@@ -253,7 +253,7 @@ async function submitJellyfish() {
     btn.textContent = 'Submitting...';
 
     try {
-        const resp = await fetch('/api/custom/submit', {
+        const resp = await fetch(API_BASE + '/api/custom/submit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -276,9 +276,9 @@ async function submitJellyfish() {
         document.getElementById('result-name').textContent = name;
 
         const resultImg = document.getElementById('result-preview-img');
-        resultImg.src = `/api/custom/thumbnail/${data.id}`;
+        resultImg.src = `${API_BASE}/api/custom/thumbnail/${data.id}`;
         resultImg.onerror = () => {
-            fetch('/api/custom/render', {
+            fetch(API_BASE + '/api/custom/render', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ genome: customGenome, jelly_color: jellyColor, muscle_color: muscleColor }),

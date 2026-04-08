@@ -22,7 +22,7 @@ let evoData = { generations: [], currentGen: null, individuals: [], currentLog: 
 // Initialize
 async function init() {
     // Fetch bounds
-    const response = await fetch('/api/bounds');
+    const response = await fetch(API_BASE + '/api/bounds');
     bounds = await response.json();
 
     // Set initial genome
@@ -52,6 +52,15 @@ async function init() {
     document.getElementById('btn-render-gen').addEventListener('click', renderGeneration);
     document.getElementById('btn-sim-gen').addEventListener('click', simulateGeneration);
     loadEvolutionLogs();
+
+    // Hide GPU simulation controls if server has no GPU
+    try {
+        const cfg = await (await fetch(API_BASE + '/api/config')).json();
+        if (cfg.no_gpu) {
+            document.getElementById('btn-sim-gen').style.display = 'none';
+            document.getElementById('sim-frames').style.display = 'none';
+        }
+    } catch { /* non-fatal */ }
 }
 
 // Build gene control sliders
@@ -122,7 +131,7 @@ async function renderMorphology() {
     img.classList.remove('loaded');
 
     try {
-        const response = await fetch('/api/render', {
+        const response = await fetch(API_BASE + '/api/render', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ genome: currentGenome })
@@ -172,7 +181,7 @@ function updateStats(stats) {
 
 // Load default genome
 async function loadDefault() {
-    const response = await fetch('/api/default');
+    const response = await fetch(API_BASE + '/api/default');
     const data = await response.json();
     currentGenome = data.genome;
     updateSliders();
@@ -182,7 +191,7 @@ async function loadDefault() {
 
 // Load Aurelia genome
 async function loadAurelia() {
-    const response = await fetch('/api/aurelia');
+    const response = await fetch(API_BASE + '/api/aurelia');
     const data = await response.json();
     currentGenome = data.genome;
     updateSliders();
@@ -192,7 +201,7 @@ async function loadAurelia() {
 
 // Load random genome
 async function loadRandom() {
-    const response = await fetch('/api/random');
+    const response = await fetch(API_BASE + '/api/random');
     const data = await response.json();
     currentGenome = data.genome;
     updateSliders();
@@ -251,7 +260,7 @@ async function copyToClipboard() {
 
 async function loadEvolutionLogs() {
     try {
-        const response = await fetch('/api/evolution/logs');
+        const response = await fetch(API_BASE + '/api/evolution/logs');
         const data = await response.json();
         const select = document.getElementById('log-select');
 
@@ -295,7 +304,7 @@ function onLogSelect() {
 
 async function loadEvolutionSummary() {
     try {
-        const response = await fetch(`/api/evolution/summary?log=${encodeURIComponent(evoData.currentLog)}`);
+        const response = await fetch(`${API_BASE}/api/evolution/summary?log=${encodeURIComponent(evoData.currentLog)}`);
         const data = await response.json();
         evoData.generations = data.generations;
 
@@ -343,7 +352,7 @@ async function onGenSelect() {
     }
 
     try {
-        const response = await fetch(`/api/evolution/generation/${gen}?log=${encodeURIComponent(evoData.currentLog)}`);
+        const response = await fetch(`${API_BASE}/api/evolution/generation/${gen}?log=${encodeURIComponent(evoData.currentLog)}`);
         const data = await response.json();
         evoData.currentGen = gen;
         evoData.individuals = data.individuals;
@@ -398,6 +407,7 @@ function loadIndividual(ind) {
     document.querySelector('.viewer').scrollIntoView({ behavior: 'smooth' });
 }
 
+
 async function renderGeneration() {
     if (!evoData.individuals.length) return;
 
@@ -413,10 +423,10 @@ async function renderGeneration() {
     btn.textContent = 'Rendering...';
 
     try {
-        const response = await fetch('/api/render/grid', {
+        const response = await fetch(API_BASE + '/api/render/grid', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ individuals: evoData.individuals })
+            body: JSON.stringify({ individuals: evoData.individuals, random_colors: true, color_variance: 0.5 })
         });
 
         const data = await response.json();
@@ -461,7 +471,7 @@ async function simulateGeneration() {
     document.getElementById('evo-video-container').classList.add('hidden');
 
     try {
-        const response = await fetch('/api/simulate/generation', {
+        const response = await fetch(API_BASE + '/api/simulate/generation', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -500,7 +510,7 @@ function pollSimStatus(expectedVideo, totalFrames) {
 
     simPollInterval = setInterval(async () => {
         try {
-            const response = await fetch('/api/simulate/status');
+            const response = await fetch(API_BASE + '/api/simulate/status');
             const status = await response.json();
 
             if (status.state === 'running' || status.state === 'starting') {
@@ -520,7 +530,7 @@ function pollSimStatus(expectedVideo, totalFrames) {
                 btn.textContent = 'Simulate Generation';
 
                 // Show video
-                const videoUrl = `/api/simulate/video/${encodeURIComponent(expectedVideo)}`;
+                const videoUrl = `${API_BASE}/api/simulate/video/${encodeURIComponent(expectedVideo)}`;
                 showSimVideo(videoUrl, expectedVideo);
 
                 // Hide progress after a moment
